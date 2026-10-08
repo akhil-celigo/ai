@@ -32,6 +32,7 @@ This skill covers **what SQL to write and how to write it**. For which adaptor t
 4. **No quotes** for numbers: `{{{record.quantity}}}`.
 5. **Import `query` is an array of strings**, not a single string: `["INSERT INTO ..."]`.
 6. **Nested fields** use dot notation: `{{{record.address.city}}}`.
+7. **Snowflake is the exception.** On a Snowflake export, lookup, or import, write any field as `{{record.item}}`. Do not add apostrophes and do not use `'{{{record.item}}}'`. The renderer quotes and escapes the value. Rules 2–4 do not apply to a Snowflake bubble.
 
 ### Related skills
 
@@ -334,6 +335,14 @@ WHEN NOT MATCHED THEN
 ## Dialect Patterns
 
 ### Snowflake
+
+Handlebars values on a Snowflake bubble use double braces and no added apostrophes. `item` can be any field:
+
+```sql
+WHERE id = {{record.item}}
+```
+
+Do not write `'{{{record.item}}}'` or `'{{record.item}}'`.
 
 ```sql
 -- Fully qualified table names (required unless connection sets default schema)

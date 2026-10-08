@@ -58,6 +58,7 @@ All contexts use `record.` prefix to access the current record's fields (AFE 2.0
 | HTTP relative URI | `{{{ }}}` (triple) | `record.` | `{{{record.orderId}}}` in URI |
 | HTTP body / postBody | `{{{ }}}` (triple) | `record.` | `{{{record.orderId}}}` in JSON body |
 | SQL query (RDBMS) | `{{{ }}}` (triple) | `record.` | `{{{record.email}}}` in WHERE clause |
+| Snowflake SQL | `{{ }}` (double) | `record.` | `{{record.item}}` — no surrounding quotes |
 | Output filter | `{{ }}` (double) | `record.` | `{{record.status}}` |
 | Delta URI parameter | `{{{ }}}` (triple) | (platform-injected) | `{{{lastExportDateTime}}}` |
 
@@ -70,7 +71,9 @@ Additional context objects available via `@root`:
 | `settings` | Integration/flow settings |
 | `connection` | Connection object (for auth headers) |
 
-When **one-to-many grouping** is configured, the data shape changes to `batch_of_records` -- iterate with `{{#each batch_of_records}}` to access individual records.
+**One-to-many, grouping, and batch size are different shapes.** After `oneToMany` + `pathToMany`, the child element is `record` and the parent is `record._PARENT` (`{{record._PARENT.id}}`). That fan-out does not create `batch_of_records`. `batch_of_records` appears only when `batchSize` is greater than 1. `groupByFields` binds the grouped rows as `rows`, not `batch_of_records`.
+
+**Snowflake SQL does not take added apostrophes.** On a Snowflake export, lookup, or import, write any field as `{{record.item}}`. Do not wrap it in quotes and do not use `'{{{record.item}}}'`. The renderer quotes and escapes the value. The general RDBMS rule to prefer triple braces and add your own quotes does not apply to a Snowflake bubble.
 
 ### Key Syntax
 
@@ -226,7 +229,7 @@ Where the expression runs determines what data is available. In AFE 2.0, all con
 
 Other context objects (`job`, `settings`, `connection`) are accessible via `@root` -- e.g., `{{@root.connection.http.encrypted.apiKey}}`.
 
-When one-to-many grouping is active, the shape is `batch_of_records` and you must iterate: `{{#each batch_of_records}}{{record.field}}{{/each}}`.
+When `oneToMany` is active, the child is `record` and the parent is `record._PARENT`. Iterate `batch_of_records` only when `batchSize` is greater than 1: `{{#each batch_of_records}}{{record.field}}{{/each}}`. For `groupByFields`, iterate `rows`.
 
 ### 2. Know the data shape
 
@@ -242,7 +245,7 @@ celigo --jq '.mockOutput' exports get <exportId>
 
 ### 3. Choose the right braces
 
-- Default to `{{{ }}}` (triple) for HTTP bodies, SQL, URIs, file paths
+- Default to `{{{ }}}` (triple) for HTTP bodies, SQL, URIs, file paths. Snowflake SQL is the exception: use `{{record.item}}` with no added apostrophes
 - Use `{{ }}` (double) only in mapping extracts and display text where HTML escaping is acceptable
 - When in doubt, use triple -- raw output never breaks SQL or JSON; HTML-escaped output can
 
@@ -281,15 +284,32 @@ Avoid trailing commas when building JSON arrays:
 {{#each record.items}}{...}{{#if @last}}{{else}},{{/if}}{{/each}}
 ```
 
-### Grouped data access (one-to-many / batch_of_records)
+### One-to-many (`record` and `record._PARENT`)
 
-When one-to-many grouping is configured, the data shape becomes `batch_of_records`. Iterate to access individual records:
+After `oneToMany` + `pathToMany`, the child element is the record. Parent fields stay on `_PARENT`:
+
+```
+{{record.variantId}}
+{{record._PARENT.id}}
+```
+
+`batch_of_records` is the shape for `batchSize` greater than 1, including after fan-out. It is not the one-to-many shape:
 
 ```
 {{#each batch_of_records}}
   {{record.orderId}}
-  {{record.[Shipping City]}}
+  {{record._PARENT.id}}
 {{/each}}
+```
+
+`groupByFields` binds the grouped rows as `rows` (`{{#each rows}}`), not `batch_of_records`.
+
+### Snowflake SQL values
+
+On a Snowflake bubble, any field is `{{record.item}}`. Do not add apostrophes:
+
+```
+WHERE id = {{record.item}}
 ```
 
 ### Conditional field with fallback
