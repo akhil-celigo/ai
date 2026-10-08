@@ -49,7 +49,7 @@ Every script function runs at a specific point in the pipeline. Choose based on 
 |------|---------|------|-------|-------------|
 | `postResponseMap` | Page processor (flow/API/tool) | After response mapping merges results | `options.postResponseMapData[]`, `responseData[]` | `postResponseMapData[]` (same length) |
 
-Configured on the flow's `pageProcessors[]` entry, not on the export/import. Plan this hook when building the resource, but wire it at the flow level.
+Configured on the flow's `pageProcessors[]` entry, not on the export/import. Plan this hook when building the resource, but wire it at the flow level. On a one-to-many step it runs once per parent record. Set `postResponseHookToProcessOnChildRecord: true` on the script when the hook must run once per fanned-out child; the child is then the record and the parent is `record._PARENT`.
 
 ### Routing and Handlers
 
@@ -313,7 +313,7 @@ Before creating or updating a script, verify:
 4. **PUT erases `content` if omitted.** Always GET the script first, modify, then PUT the complete object. The `set` command handles this automatically.
 5. **One script resource can contain multiple functions.** A single script with both `preSavePage` and `preMap` functions can be wired to different resources by specifying the `function` name in each hook reference.
 6. **Throwing an exception fails the entire page.** In batch hooks (preSavePage, preMap, postMap, postSubmit), an unhandled exception fails ALL records on that page, not just one. Use the error return pattern (`{ errors: [...] }`) for per-record errors.
-7. **`postResponseMap` lives on the flow, not the resource.** The hook is configured on the `pageProcessors[]` entry in the flow/API/tool, even though it processes export or import response data.
+7. **`postResponseMap` lives on the flow, not the resource.** The hook is configured on the `pageProcessors[]` entry in the flow/API/tool, even though it processes export or import response data. By default it runs once per parent on a one-to-many step; `postResponseHookToProcessOnChildRecord: true` runs it once per child.
 8. **filter/transform scripts replace expression-based alternatives.** Wiring a script filter replaces any existing expression filter. They cannot coexist on the same resource.
 9. **`console.log()` output goes to script logs, not stdout.** Use `celigo scripts debug-logs` to see output. Logs require debug mode to be enabled for debug-level messages.
 10. **Only `console.debug()` needs the debug window.** `error` / `warn` / `info` / `log` are always captured; `debug` output is persisted only while a time-bounded debug window is open (`celigo scripts enable-debug`). A closed window silently drops `console.debug()` output.
