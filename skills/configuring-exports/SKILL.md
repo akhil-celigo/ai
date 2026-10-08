@@ -292,7 +292,7 @@ Three consequences worth knowing before you debug the wrong thing:
 
 - **The build-time preview warning is expected.** Previewing a fanned-out lookup in isolation reports "`<field>` not defined in the model" because no upstream record is bound yet. That is not a broken template -- don't "fix" a correct `{{record.X}}` reference because of it.
 - **Response mapping merges per element automatically.** To get looked-up values back onto each element, author a normal top-level `fields` response mapping; Celigo merges each result into its corresponding fanned-out element.
-- **Two anti-patterns.** Don't target the array with a `lists` entry (that nests a new array inside each element), and don't attempt the per-element merge in `postResponseMap` (it runs on the parent records, not once per child).
+- **Two anti-patterns.** Don't target the array with a `lists` entry (that nests a new array inside each element), and don't attempt the per-element merge in `postResponseMap` (it sees the page of parent records, not per-element results).
 
 ### Source-side transform vs destination-side mapping
 
