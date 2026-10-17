@@ -229,7 +229,7 @@ Where the expression runs determines what data is available. In AFE 2.0, all con
 
 Other context objects (`job`, `settings`, `connection`) are accessible via `@root` -- e.g., `{{@root.connection.http.encrypted.apiKey}}`.
 
-When `oneToMany` is active with a `pathToMany`, the child is `record` and the parent is `record._PARENT`; with a blank `pathToMany` on an array (grouped) record, each element is `record`. Iterate `batch_of_records` only when `batchSize` is greater than 1: `{{#each batch_of_records}}{{record.field}}{{/each}}`. For `groupByFields` rows that are not fanned out, iterate `rows`.
+When `oneToMany` is active, the child is `record` and the parent is `record._PARENT`. Iterate `batch_of_records` only when `batchSize` is greater than 1: `{{#each batch_of_records}}{{record.field}}{{/each}}`. For `groupByFields`, iterate `rows`.
 
 ### 2. Know the data shape
 
