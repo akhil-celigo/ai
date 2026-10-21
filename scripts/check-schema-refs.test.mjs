@@ -64,20 +64,50 @@ test("findDanglingRefs reports a missing file, a ref out of the skill, and a mis
 				"    - $ref: './base.yml#/Base'",
 				"    - $ref: '../../../common/schemas/resource-response.yml#/ResourceResponse'",
 				"    - $ref: './present.yml#/Renamed'",
+				"    - $ref: './present.yml#/Present/properties/gone'",
 				"    - $ref: '#/Nowhere'",
 				"",
 			].join("\n"),
 		],
-		["skills/a/references/schemas/present.yml", "Present:\n  type: object\n"],
+		["skills/a/references/schemas/present.yml", "Present:\n  type: object\n  properties:\n    kept:\n      type: string\n"],
 	]);
 	assert.deepEqual(
 		findDanglingRefs(files).map((d) => `${d.ref} — ${d.reason}`),
 		[
 			"./base.yml#/Base — skills/a/references/schemas/base.yml is not present",
 			"../../../common/schemas/resource-response.yml#/ResourceResponse — skills/common/schemas/resource-response.yml is outside the skill",
-			"./present.yml#/Renamed — skills/a/references/schemas/present.yml has no top-level Renamed",
-			"#/Nowhere — skills/a/references/schemas/request.yml has no top-level Nowhere",
+			"./present.yml#/Renamed — skills/a/references/schemas/present.yml has nothing at #/Renamed",
+			"./present.yml#/Present/properties/gone — skills/a/references/schemas/present.yml has nothing at #/Present/properties/gone",
+			"#/Nowhere — skills/a/references/schemas/request.yml has nothing at #/Nowhere",
 		],
+	);
+});
+
+test("quoted $ref keys and flow refs with sibling keys are read, rewritten and checked", () => {
+	const text = [
+		"A:",
+		"  properties:",
+		'    b:\n      "$ref": "../../../common/schemas/x.yml#/X"',
+		"    c: { $ref: '../../../common/schemas/y.yml#/Y', description: d }",
+		"",
+	].join("\n");
+	assert.deepEqual(
+		extractRefs(text).map((r) => r.file),
+		["../../../common/schemas/x.yml", "../../../common/schemas/y.yml"],
+	);
+	assert.match(rewriteRefs(text, (file) => file.replace("../../../common/schemas/", "../common-schemas/")), /"\$ref": "\.\.\/common-schemas\/x\.yml#\/X"[\s\S]*\$ref: '\.\.\/common-schemas\/y\.yml#\/Y', description/);
+	const files = new Map([["skills/a/references/schemas/a.yml", text]]);
+	assert.equal(findDanglingRefs(files).length, 2);
+});
+
+test("findDanglingRefs reports a fragment that is not a JSON pointer", () => {
+	const files = new Map([
+		["skills/a/references/schemas/r.yml", "R:\n  properties:\n    b:\n      $ref: './base.yml#ExportBase'\n"],
+		["skills/a/references/schemas/base.yml", "ExportBase:\n  type: object\n"],
+	]);
+	assert.deepEqual(
+		findDanglingRefs(files).map((d) => d.reason),
+		["#ExportBase is not a JSON pointer"],
 	);
 });
 

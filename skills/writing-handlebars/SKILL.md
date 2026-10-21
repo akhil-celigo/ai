@@ -13,7 +13,7 @@ Concerns when writing Handlebars:
 
 - **Context** -- where the expression runs determines what data is available and how output is treated
 - **Braces** -- double `{{ }}` vs triple `{{{ }}}` controls output escaping
-- **Field access** -- `record.` prefix in all contexts (AFE 2.0), `@root` for job/settings/connection, bracket notation for special characters
+- **Field access** -- `record.` prefix (AFE 2.0) outside a few bare-field contexts ([Key Syntax](#key-syntax)), `@root` for job/settings/connection, bracket notation for special characters
 - **Helpers** -- 79 custom helpers for math, string manipulation, dates, encoding, regex, and more
 - **Block helpers** -- `#each`, `#if`, `#compare`, `#with` for iteration and conditional logic
 - **Date/time** -- moment.js format tokens with timezone support
@@ -32,11 +32,11 @@ Export and import `http` blocks use Handlebars in `relativeURI`, `body`, `header
 
 ### RDBMS SQL queries
 
-SQL queries in `rdbms.query` use Handlebars with the mandatory `record.` prefix. Double braces render the value as a single-quoted SQL string literal with embedded quotes escaped -- use them for strings and timestamps, without adding quotes of your own. Triple braces output the raw value, for numbers and identifiers. For full SQL patterns (MERGE, upsert, bulk operations, dialect differences), see [writing-sql](../writing-sql/SKILL.md).
+SQL queries in `rdbms.query` use Handlebars with the mandatory `record.` prefix (a `per_page` query iterates `batch_of_records` instead -- see [Template roots](#template-roots)). Double braces render the value as a single-quoted SQL string literal with embedded quotes escaped -- use them for strings and timestamps, without adding quotes of your own. Triple braces output the raw value, for numbers and identifiers. For full SQL patterns (MERGE, upsert, bulk operations, dialect differences), see [writing-sql](../writing-sql/SKILL.md).
 
-### Output filters
+### Filter rule operands
 
-Expression-based filters on exports use Handlebars to evaluate whether a record passes through or gets skipped.
+Filters are rule arrays, not templates (see [configuring-filters](../configuring-filters/SKILL.md)). A Handlebars string can be one operand of a rule, but only when the whole string is a single `{{…}}` expression with `record.`-prefixed paths: `["equals", "{{lowercase record.status}}", "open"]`. It renders as text, so wrap it in `["number", …]` before comparing it to a number.
 
 ### File paths and names
 
@@ -44,21 +44,22 @@ Dynamic file names in FTP/S3 exports and imports use Handlebars for timestamps a
 
 ### Delta tokens
 
-Platform-injected variables like `{{lastExportDateTime}}` provide the last successful export timestamp for incremental syncs. These are not record fields -- the platform injects them at runtime into the export's HTTP/query context only.
+Delta exports get two platform variables: `{{lastExportDateTime}}`, the last successful run (the window's lower bound), and `{{currentExportDateTime}}`, this run's upper bound. These are not record fields -- the platform injects them at runtime into the export's HTTP/query context only.
 
 ## Quick Reference
 
 ### Context Decision Matrix (AFE 2.0)
 
-All contexts use `record.` prefix to access the current record's fields (AFE 2.0). Do NOT use bare field names, `data.field`, or `data.0.field` -- those are deprecated AFE 1.0 patterns. **Exception:** Mapper 1.0 (Salesforce / NetSuite DA) uses bare field names without `record.` prefix.
+All contexts use `record.` prefix to access the current record's fields (AFE 2.0). Do NOT use bare field names, `data.field`, or `data.0.field` -- those are deprecated AFE 1.0 patterns. **Exceptions:** Mapper 1.0 (Salesforce / NetSuite DA), NetSuite saved-search criteria and an HTTP import lookup's body use bare field names without `record.` prefix (see [Key Syntax](#key-syntax)).
 
 | Where | Syntax | Data prefix | Example |
 |---|---|---|---|
 | Mapping extract | `{{ }}` (double) | `record.` | `{{record.firstName}}` |
 | HTTP relative URI | `{{ }}` (double) -- URL-encoded at runtime; triple only for an already-encoded value | `record.` | `/customers?email={{record.email}}` |
-| HTTP body / postBody | `{{{ }}}` (triple) | `record.` | `{{{record.orderId}}}` in JSON body |
+| HTTP body | `{{{ }}}` (triple) | `record.` | `{{{record.orderId}}}` in JSON body |
+| HTTP import lookup body (`http.lookups[].body`) | `{{{ }}}` (triple) | none: the record's fields are at the top level | `{"email": "{{{email}}}"}` |
 | SQL query (RDBMS) | `{{ }}` for strings and dates (quoted for you), `{{{ }}}` for numbers and identifiers | `record.` | `WHERE email = {{record.email}} AND qty > {{{record.qty}}}` |
-| Output filter | `{{ }}` (double) | `record.` | `{{record.status}}` |
+| Filter rule operand | `{{ }}` (double), one expression filling the operand | `record.` | `["equals", "{{record.status}}", "open"]` |
 | Delta URI parameter | `{{ }}` (double) | (platform-injected) | `?updated_since={{lastExportDateTime}}` |
 
 An ID with no special characters renders the same with either brace style, which is why URI examples like `/customers/{{{record.id}}}` work too.
@@ -67,12 +68,12 @@ Additional context objects available via `@root`:
 
 | Object | Description |
 |--------|-------------|
-| `record` | Current record being processed |
+| `record` | Current record being processed (`rows` when it's a grouped record) |
 | `job` | Current job metadata |
-| `settings` | Integration/flow settings |
+| `settings` | Settings by scope key: `settings.integration`, `settings.flowGrouping`, `settings.flow`, `settings.connection`, `settings.iClient`, and the step's own `settings.export` or `settings.import` |
 | `connection` | Connection object (for auth headers) |
 
-**One-to-many, grouping, and batch size are different shapes.** After `oneToMany` + `pathToMany`, the child element is `record` and the parent is `record._PARENT` (`{{record._PARENT.id}}`). That fan-out does not create `batch_of_records`. `batch_of_records` appears only when `batchSize` is greater than 1. `groupByFields` binds the grouped rows as `rows`, not `batch_of_records`.
+**The root follows the record's shape.** An object record is `record`; a grouped record (an array of rows) is `rows`, and `record.*` is undefined on it. `batch_of_records` replaces both only when an HTTP import sends several records per request (`http.batchSize` above 1) or an RDBMS import runs `per_page`. One-to-many doesn't batch by itself: each child renders as `record`. See [Template roots](#template-roots).
 
 ### Key Syntax
 
@@ -80,7 +81,7 @@ Additional context objects available via `@root`:
 - **`{{{triple-braces}}}`** -- raw output, no encoding or quoting. Use for JSON bodies, headers, file paths, numbers and identifiers in SQL, and URI values that are already URL-encoded (double braces would encode them a second time). Never hand-quote a triple-brace string in SQL (`'{{{record.name}}}'`) -- the first apostrophe in the data breaks the statement.
 - **The preview isn't the runtime.** The expression preview HTML-escapes double braces (`&` shows as `&amp;`); a running request URL-encodes them in a URI and quotes them in SQL instead.
 - **Always use `record.` prefix (AFE 2.0)** -- `{{{record.fieldName}}}` in all contexts, never bare `{{{fieldName}}}` or `{{{data.fieldName}}}` (AFE 1.0). Nested fields: `{{{record.properties.email}}}`.
-- **Exception: Mapper 1.0 (Salesforce / NetSuite DA)** -- uses bare field names without `record.` prefix. This is the only context where bare field references are correct.
+- **Exceptions: Mapper 1.0, NetSuite search criteria and HTTP import lookup bodies** -- Mapper 1.0 (Salesforce / NetSuite DA) uses bare field names without `record.` prefix. So do NetSuite saved-search lookup criteria (`netsuite.restlet.criteria[].searchValue` and criteria formulas), where the incoming record is the root: write `{{poNumber}}`. `{{record.poNumber}}` resolves in runs but fails the step preview with `handlebars_template_parse_error`. So does the request template of an HTTP import's own lookup, in `http.lookups[].body` (a `postBody` there is never sent): the record's fields sit at the top level, so `{{email}}` renders the record's value and `{{record.email}}` renders empty ([configuring-imports > Gotchas](../configuring-imports/SKILL.md#gotchas)). A lookup export (`isLookup: true`) reads `{{record.email}}` as usual.
 
 ## Related Skills
 
@@ -104,7 +105,7 @@ Additional context objects available via `@root`:
 
 | Pattern | Meaning |
 |---------|---------|
-| `record.fieldName` | Standard field reference -- all contexts (AFE 2.0) |
+| `record.fieldName` | Standard field reference (AFE 2.0), outside the [Key Syntax](#key-syntax) bare-field contexts |
 | `record.nested.field` | Dot-notation for nested objects |
 | `record.[Field With Spaces]` | Bracket notation for special characters in field names |
 | `record.items.[0].name` | Array index access |
@@ -151,20 +152,33 @@ Timezone: pass as the **fourth** argument, after the input format (`""` when the
 
 ## Runtime Context at Each Stage
 
-What `{{record.X}}` or `{{settings.Y}}` actually resolves to depends on **which bubble** the expression runs in. The shapes below were captured by setting `body: "{{{jsonSerialize this}}}"` on import/lookup bubbles and echoing through a mirror endpoint — they represent exactly what's available at runtime.
+What `{{record.X}}` or `{{settings.Y}}` actually resolves to depends on **which bubble** the expression runs in and on the shape of the record it renders against. The bubble shapes below come from captures of the whole context on import and lookup bubbles, echoed through integrator.io's own `/v1/mirror`; such a capture carries credential material, so read [How to rediscover the shape for any bubble](#how-to-rediscover-the-shape-for-any-bubble) before making one. A capture lists the context's own keys, so it never shows `record` or `rows` (see [Template roots](#template-roots)).
+
+### Template roots
+
+- **`record`** -- the record, when it's an object.
+- **`rows`** -- the record, when it's grouped (an array of rows: a `groupByFields` export, file key columns, a grouped NetSuite saved search). Read it as `{{rows.0.field}}` or `{{#each rows}}`; `record.*` is undefined on it.
+- **`batch_of_records`** -- the root only when an HTTP import sends several records per request (`http.batchSize` above 1) or an RDBMS import runs `per_page`. Iterate `{{#each batch_of_records}}` and read `this.record.<field>` (`this.rows` for a grouped record); a root-level `record` or `rows` is undefined there.
+- **One-to-many doesn't batch by itself** -- each child renders as `record` (children are batched only under the `batchSize` rule above), and with `pathToMany` set the parent's other fields are under `record._PARENT`.
+- **`data`** -- always lists the records in the current request: one record when the import sends one per request.
 
 ### Import bubble (HTTPImport, NetSuiteDistributedImport, etc.)
 
-Body templates and Handlebars in `mappings[].extract` run per-record with this context:
+On an HTTP import, fields render against different versions of the record:
+
+- `http.body` renders against the mapped record (unless `http.sendPostMappedData` is false), so template it with the mapped (destination) field names; a mapping that outputs the `rows [ ]` structure makes the body's root `rows`. Leave `http.body` unset to send the mapped record as is.
+- `relativeURI`, header values and `mappings[].extract` see the record before mapping (source field names).
+- An undefined path renders empty in a body and the record still succeeds (`strictHandlebarEvaluation` doesn't change that). In a relative URI or a header it fails the request.
+
+Besides the root, the context carries:
 
 ```
 {
-  "0": { ...the record at batch index 0, with mapped fields... },   // per-record
-  "data": [ ...array of all records in this page, post-mapping... ],
+  "data": [ ...the records in this request... ],
   "lookup": { ...merged results from preceding lookup steps... },
   "recordLookupError": null | { ... },                               // set when a lookup failed
-  "settings": { "import": {...}, "connection": {...} },
-  "connection": { /* FULL connection object: auth, baseURI, etc. */ },
+  "settings": { "import": {...}, "connection": {...}, ... },         // one key per scope
+  "connection": { /* FULL connection object: auth, baseURI, encrypted credential fields, etc. */ },
   "import": { /* full import config */ },
   "job": { "parentJob": { "_id", "type", "startedAt", ... } },
   "templateVersion": 1,
@@ -174,15 +188,15 @@ Body templates and Handlebars in `mappings[].extract` run per-record with this c
 
 ### Lookup bubble (HTTPExport with `isLookup: true`)
 
-Lookup request templates run per-record with a **different** shape:
+Lookup request templates run per-record with a **different** shape (an HTTP import's own `http.lookups[]` aren't lookup exports: `record.` renders empty in their body, so name the fields at the top level; see [Key Syntax](#key-syntax)):
 
 ```
 {
   "exportStartTime": "ISO timestamp",
   "settings": { "export": {...}, "connection": {...} },
-  "connection": { /* full connection object */ },
+  "connection": { /* full connection object, encrypted credential fields included */ },
 
-  // the record is spread at TOP LEVEL (not indexed by `0` like imports)
+  // the record is spread at TOP LEVEL
   "_id": "...",
   "name": "...",
   "<other record fields>": "...",
@@ -202,8 +216,8 @@ Export URI templates and delta tokens have a minimal context — the platform in
 
 | Context key | Import | Lookup |
 |---|---|---|
-| Record location | `0.<field>` + `data[].<field>` | `<field>` (top-level) + `data.<field>` |
-| `data` shape | array of records | single record (with `_INITDATA` nested) |
+| Address the record as | `record.<field>` (`rows` when grouped, `batch_of_records` when batched) | `record.<field>` (the capture also shows its fields at the top level and in `data`) |
+| `data` shape | the records in this request (one when the import sends one per request) | single record (with `_INITDATA` nested) |
 | `exportStartTime` | No | Yes |
 | `lookup` | Yes (merged preceding results) | N/A |
 | `import` / `job` / `recordLookupError` / `testMode` | Yes | No |
@@ -211,25 +225,28 @@ Export URI templates and delta tokens have a minimal context — the platform in
 
 ### How to rediscover the shape for any bubble
 
-Set the body on an HTTP import or lookup to `{{{jsonSerialize this}}}` and point it at an echo endpoint (integrator.io's `/v1/mirror` works). Enable flow execution logging, run the flow, and inspect the `apiCall.response.body` — it's a copy of what you sent, which is the full runtime context. This works for any bubble whose adaptor sends an HTTP body.
+Serialize only what you need. `{{{jsonSerialize this}}}` sends the whole runtime context to whatever endpoint the step calls, and that context includes the step's connection with its encrypted credential fields. To see a record's shape, set the body on an HTTP import or lookup to `{{{jsonSerialize record}}}` (`rows` for a grouped record) and point it only at integrator.io's own `/v1/mirror`, never a third-party echo service. Enable flow execution logging, run the flow, and inspect the `apiCall.response.body` — it's a copy of what you sent. Capture the whole context only when you need a key outside the record, still only to `/v1/mirror`, and treat the result as a secret: it holds that credential material. A whole-context capture lists the context's own keys, and `record` and `rows` are aliases, not keys, so it never prints them: take the root from the record's shape ([Template roots](#template-roots)), not from the capture. This works for any bubble whose adaptor sends an HTTP body.
 
 ## How to Write a Handlebars Expression
 
 ### 1. Identify the context
 
-Where the expression runs determines what data is available. In AFE 2.0, all contexts use `record.` to access the current record:
+Where the expression runs determines what data is available. In AFE 2.0, contexts use `record.` to access the current record, apart from the [Key Syntax](#key-syntax) exceptions:
 
 | Context | Available data | Prefix |
 |---------|---------------|--------|
 | Mapping extract | Current record | `record.` |
 | HTTP body/URI | Current record | `record.` |
+| HTTP import lookup body | Current record, fields at the top level | none (`{{email}}`) |
 | RDBMS query | Current record | `record.` |
-| Output filter | Current record | `record.` |
-| Delta URI parameter | Platform variables | `lastExportDateTime`, `lastExportDateTimeUTC` |
+| Filter rule operand | Current record | `record.` |
+| Delta URI parameter | Platform variables | `lastExportDateTime`, `currentExportDateTime` |
 
 Other context objects (`job`, `settings`, `connection`) are accessible via `@root` -- e.g., `{{@root.connection.http.encrypted.apiKey}}`.
 
-When `oneToMany` is active, the child is `record` and the parent is `record._PARENT`. Iterate `batch_of_records` only when `batchSize` is greater than 1: `{{#each batch_of_records}}{{record.field}}{{/each}}`. For `groupByFields`, iterate `rows`.
+Reference settings through a scope key: `{{settings.integration.x}}`, `{{settings.flowGrouping.x}}`, `{{settings.flow.x}}`, `{{settings.connection.x}}`, `{{settings.iClient.x}}`, or the step's own `{{settings.export.x}}` / `{{settings.import.x}}`. Steps inside an API or a Tool get only their own scope plus connection and iClient. `{{settings.x}}` and paths built from settings-form labels resolve to nothing: they render empty in a body and fail the request in a relative URI or header, where rendering is strict.
+
+When the step batches (`http.batchSize` above 1, or an RDBMS `per_page` query), iterate `{{#each batch_of_records}}{{this.record.field}}{{/each}}`. A grouped record is `rows` (`{{rows.0.field}}`), and a one-to-many child is `record`, with its parent's fields under `record._PARENT` when `pathToMany` is set.
 
 ### 2. Know the data shape
 
@@ -286,25 +303,23 @@ Avoid trailing commas when building JSON arrays:
 {{#each record.items}}{...}{{#if @last}}{{else}},{{/if}}{{/each}}
 ```
 
-### One-to-many (`record` and `record._PARENT`)
+### Batched, grouped and one-to-many records
 
-After `oneToMany` + `pathToMany`, the child element is the record. Parent fields stay on `_PARENT`:
-
-```
-{{record.variantId}}
-{{record._PARENT.id}}
-```
-
-`batch_of_records` is the shape for `batchSize` greater than 1, including after fan-out. It is not the one-to-many shape:
+When an HTTP import sends several records per request (`http.batchSize` above 1) or an RDBMS import runs `per_page`, iterate `batch_of_records`; each entry carries `record` (`rows` for a grouped record):
 
 ```
 {{#each batch_of_records}}
-  {{record.orderId}}
-  {{record._PARENT.id}}
+  {{this.record.orderId}}
+  {{this.record.[Shipping City]}}
 {{/each}}
 ```
 
-`groupByFields` binds the grouped rows as `rows` (`{{#each rows}}`), not `batch_of_records`.
+With one record per request, a grouped record is `rows`, and a one-to-many child is `record`, with the parent under `record._PARENT` when `pathToMany` is set:
+
+```
+{{#each rows}}{{this.sku}} {{/each}}
+{{record._PARENT.orderId}}
+```
 
 ### Conditional field with fallback
 
@@ -316,7 +331,7 @@ After `oneToMany` + `pathToMany`, the child element is the record. Parent fields
 
 ```
 {{#each record.orders}}
-  Order: {{{this.id}}}  Customer: {{{../customerName}}}
+  Order: {{{this.id}}}  Customer: {{{../record.customerName}}}
   {{#each this.items}}
     Item: {{{this.sku}}}
   {{/each}}
@@ -348,11 +363,13 @@ SELECT id FROM orders WHERE status IN ({{{record.statusList}}})
 Before finalizing any Handlebars expression, verify each item:
 
 - [ ] **Braces match the field.** `{{ }}` for values in a `relativeURI` (URL-encoded at runtime) and for string and date values in SQL (quoted and escaped -- no quotes of your own); `{{{ }}}` for JSON bodies, headers, file paths, SQL numbers and identifiers, and already-encoded URI values.
-- [ ] **`record.` prefix everywhere (AFE 2.0).** All contexts use `record.fieldName` -- mappings, HTTP bodies, SQL, filters. Never use bare `fieldName`, `data.fieldName`, or `data.0.fieldName` (AFE 1.0). Exception: Mapper 1.0 (Salesforce / NetSuite DA) uses bare field names.
+- [ ] **`record.` prefix everywhere (AFE 2.0).** All contexts use `record.fieldName` -- mappings, HTTP bodies, SQL, filters. Never use bare `fieldName`, `data.fieldName`, or `data.0.fieldName` (AFE 1.0). Exceptions: Mapper 1.0 (Salesforce / NetSuite DA), NetSuite saved-search criteria and an HTTP import lookup's body (`http.lookups[].body`) use bare field names.
+- [ ] **The root matches the record's shape.** A grouped record is `rows`, and a batched request (`http.batchSize` above 1, RDBMS `per_page`) is `batch_of_records`; `record.*` is undefined on both.
+- [ ] **No literal `}` against a closing tag.** `{"in": {{{jsonSerialize record}}} }`, not `{"in": {{{jsonSerialize record}}}}`.
 - [ ] **`lastExportDateTime` only in export context.** This platform-injected variable is available in the export's HTTP/query context for delta syncs only -- not in mappings or import templates.
 - [ ] **`dateAdd` values in milliseconds.** 1 day = 86,400,000. Not seconds, not hours.
 - [ ] **`#each` context shifts.** Inside `{{#each}}`, `this` is the current item. Use `../` for parent or `@root` for top-level fields.
-- [ ] **Missing fields: empty in bodies, errors elsewhere.** In an HTTP body or a mapping an undefined field renders an empty string -- guard with `{{#if field}}` when the downstream system rejects empty values. In a relative URI, a header, or an SQL query the same undefined path fails the request instead.
+- [ ] **Missing fields: empty in bodies, errors elsewhere.** In an HTTP body or a mapping an undefined field renders an empty string -- guard with `{{#if field}}` when the downstream system rejects empty values. In a relative URI, a header, or an SQL query the same undefined path fails the request instead. Guard an optional date or object before passing it to `dateFormat`, `dateAdd` or `jsonSerialize`.
 - [ ] **Bracket notation for special characters.** Field names with spaces, dots, or hyphens need `record.[Field Name]` syntax.
 - [ ] **`compare` is string-based.** `{{#compare "9" ">" "10"}}` is TRUE (lexicographic). Convert values first or use strict operators.
 - [ ] **Test with real data.** Run `celigo exports invoke` (reads the source) or `celigo imports invoke` (writes to the destination -- use a test destination) to verify the expression renders correctly with actual records.
@@ -360,15 +377,16 @@ Before finalizing any Handlebars expression, verify each item:
 ## Gotchas
 
 1. **Double braces format for the field they're in.** At runtime `{{ }}` URL-encodes in a `relativeURI` and renders a quoted, escaped SQL string literal in an RDBMS query -- usually what you want. Triple braces skip that: a raw `&` or space breaks a query string, and a hand-quoted `'{{{record.name}}}'` breaks on an apostrophe. Use `{{{ }}}` where raw is the point -- JSON bodies, headers, SQL numbers and identifiers, and values already URL-encoded, which double braces would encode twice (`%2B` becomes `%252B`).
-2. **Always use `record.` prefix (AFE 2.0).** Use `{{{record.fieldName}}}`, not `{{{fieldName}}}` or `{{{data.fieldName}}}`. The `record.` prefix applies in all contexts -- mappings, HTTP, SQL, filters. Bare field names and `data.` prefix are deprecated AFE 1.0 syntax.
+2. **Always use `record.` prefix (AFE 2.0).** Use `{{{record.fieldName}}}`, not `{{{fieldName}}}` or `{{{data.fieldName}}}`. The `record.` prefix applies in mappings, HTTP, SQL and filters; bare field names belong only in the [Key Syntax](#key-syntax) exceptions (Mapper 1.0, NetSuite search criteria, an HTTP import lookup's body). Elsewhere, bare field names and the `data.` prefix are deprecated AFE 1.0 syntax.
 3. **`lastExportDateTime` is platform-injected.** It exists only in the export's HTTP/query context for delta syncs -- not available in mappings or import templates.
 4. **`compare` does string comparison.** `{{#compare "9" ">" "10"}}` is TRUE because `"9" > "1"` lexicographically. Use the strict equality operators or convert values first.
 5. **Nested `#each` changes context.** Inside `{{#each record.items}}`, `this` is the current item, not the record. Use `../` to reach the parent or `@root` for the top-level context.
 6. **`dateAdd` uses milliseconds, not seconds.** Adding 1 day is `86400000`, not `86400`. A common mistake that produces dates seconds in the future instead of days.
 7. **`regexMatch` returns the match string; `regexSearch` returns the position.** Don't confuse them -- `regexSearch` returns a number (0-indexed position), not the matched text.
 8. **Raw blocks `{{{{ }}}}` fail at runtime.** No `raw` block helper is registered, so `{{{{raw}}}}...{{{{/raw}}}}` errors (`Unable to read "call" from undefined`) instead of printing its contents. To emit literal braces, put a backslash before the tag: `\{{name}}` renders `{{name}}`.
-9. **Missing fields render empty only in bodies and mappings.** There, an undefined field outputs nothing and raises no error -- use `{{#if field}}` to guard when the downstream system rejects empty values. In a relative URI, a header, or an SQL query, rendering is strict: an undefined path fails the request (SQL steps fail with `cannot_evaluate_handlebars`).
+9. **Missing fields render empty only in bodies and mappings.** There, an undefined field outputs nothing and raises no error -- use `{{#if field}}` to guard when the downstream system rejects empty values. In a relative URI, a header, or an SQL query, rendering is strict: an undefined path fails the request (SQL steps fail with `cannot_evaluate_handlebars`). Don't count on the empty render once a helper wraps the field: on a missing input `dateFormat` prints the run's date, and `dateAdd` and `jsonSerialize` fail the record. Guard an optional date or object with `{{#if record.x}}…{{/if}}` before passing it to them. The run's error is `handlebars_template_parse_error`, with the template as its message, so only a processor render (`celigo processors invoke handlebars`) shows the helper's own error.
 10. **`jsonEncode` escapes a value; it adds no quotes.** It escapes quotes, backslashes, and newlines so a string can sit inside a JSON string you quote yourself: `"note": "{{{jsonEncode record.note}}}"`. Use triple braces -- double braces escape the result a second time (the preview shows `\&quot;`), which breaks the JSON. Numbers and booleans pass through unchanged; objects render `[object Object]`, so use `jsonSerialize` for objects and arrays.
+11. **A literal `}` can't touch a closing tag.** The parser reads `}}}` and `}}}}` as close tokens, so `{"id": {{record.id}}}` and `{{/if}}}` fail to compile (`got 'CLOSE_UNESCAPED'`), and so does `{"in": {{{jsonSerialize record}}}}` (`got 'CLOSE_RAW_BLOCK'`). The save doesn't catch it: the step saves, and every record fails at run time. Put a space or a newline before the literal brace: `{"in": {{{jsonSerialize record}}} }`. Comment closes are exempt. JSON written inside a string, such as a GraphQL `variables` value, hits this most often.
 
 ## Common Errors
 
@@ -378,7 +396,10 @@ Before finalizing any Handlebars expression, verify each item:
 | `&amp;` / `&#x3D;` in the preview of a URI | The preview HTML-escapes double braces; the runtime URL-encodes them | Nothing to fix -- check the URL a run actually sends |
 | `''value''` or a SQL syntax error at a quote | Quotes added around a double-brace value (`'{{record.name}}'`), or a hand-quoted triple-brace value hit an apostrophe | Use `{{record.name}}` with no quotes of your own |
 | Paging cursor or `next` link corrupted (`%2B` became `%252B`) | Double braces URL-encoding a value that was already encoded | Use triple braces for already-encoded URI values |
-| Empty output, no error | Missing `record.` prefix (or using AFE 1.0 `data.field`) | Change to `{{{record.fieldName}}}` -- applies in all contexts |
+| Empty output, no error | Missing `record.` prefix (or using AFE 1.0 `data.field`) | Change to `{{{record.fieldName}}}`, except in the [Key Syntax](#key-syntax) bare-field contexts |
+| An HTTP import lookup sends an empty value | `{{record.<field>}}` in `http.lookups[].body`, where it renders empty, or the template sits in `postBody`, which isn't sent | Name the field without `record.` (`{{email}}`), in `body` |
+| `record.<field>` empty in a body, or the request fails from a URI or header | The record is grouped (root `rows`) or the request is batched (root `batch_of_records`) | Read `{{rows.0.field}}` / `{{#each rows}}`, or iterate `batch_of_records` ([Template roots](#template-roots)) |
+| Every record fails at run time with `got 'CLOSE_UNESCAPED'` or `got 'CLOSE_RAW_BLOCK'`, though the step saved | A literal `}` touches a closing tag (`{{record.id}}}`, `{{{jsonSerialize record}}}}`) | Put a space or newline before the literal `}` |
 | Delta export returns all records | `lastExportDateTime` used outside export context (e.g., in mapping) | Move to the export's `relativeURI` or query parameter |
 | `dateAdd` produces date seconds ahead instead of days | Value in seconds instead of milliseconds | Multiply by 1000: use `86400000` not `86400` |
 | `{{#compare "9" ">" "10"}}` is TRUE | String comparison, not numeric | Convert to number first or restructure logic |

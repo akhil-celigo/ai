@@ -21,7 +21,7 @@ For full Handlebars syntax (helpers, blocks, brace rules) see the `writing-handl
 | Export delta query | `rdbms.query` | platform-injected tokens | `{{ }}` (adds the quotes) | `WHERE updated_at > {{lastExportDateTime}}` |
 | Export once mark-as-processed | `rdbms.once.query` | `record.` | `{{{ }}}` | `UPDATE orders SET exported = true WHERE id = {{{record.id}}}` |
 | Import per_record query | `rdbms.query[]` | `record.` | `{{ }}` strings, `{{{ }}}` numbers | `INSERT INTO users (name, age) VALUES ({{record.name}}, {{{record.age}}})` |
-| Import per_page query | `rdbms.query[]` | `batch_of_records` + `record.` | `{{{ }}}` | `{{#each batch_of_records}}...{{{record.field}}}...{{/each}}` |
+| Import per_page query | `rdbms.query[]` | `batch_of_records` + `record.` | `{{ }}` strings, `{{{ }}}` numbers | `{{#each batch_of_records}}...{{record.field}}...{{/each}}` |
 | Import bulk_load override | `rdbms.bulkLoad.overrideMergeQuery` | staging table ref | `{{ }}` | `MERGE INTO target USING {{import.rdbms.bulkLoad.preMergeTemporaryTable}}` |
 
 ### Key syntax rules
@@ -40,7 +40,7 @@ Use the MCP tools to find tables and columns before writing SQL:
 
 | Need | Tool | Notes |
 |---|---|---|
-| Find the connection id and dialect | `list_connections` then `get_connection` | Inspect `type` (mysql/postgresql/mssql/snowflake/oracle/bigquery/redshift/azuresynapse) and the `rdbms` block |
+| Find the connection id and dialect | `list_connections` then `get_connection` | `type` is `rdbms` (or `jdbc`); the database is `rdbms.type` (mysql/mariadb/postgresql/mssql/snowflake/oracle/bigquery/redshift/azuresynapse) or `jdbc.type` |
 | List tables and columns for a connection | `get_application_metadata` | Returns the connector's record types and fields — equivalent to the CLI's `celigo metadata types/fields` |
 | See an existing export's SQL for reference | `get_export` | Inspect the `rdbms.query` and `rdbms.once.query` fields |
 | Walk dependencies before editing | `get_flow` → `pageGenerators` / `pageProcessors` | Find which exports/imports a flow uses |
@@ -57,7 +57,7 @@ For Snowflake, use fully qualified names: `database.schema.table` (unless the co
 | Delta / incremental | `type: "delta"` | `SELECT ... WHERE updated_at > {{lastExportDateTime}}` |
 | Once (mark-as-processed) | `type: "once"` | `rdbms.query` = SELECT unprocessed; `rdbms.once.query` = UPDATE to mark processed |
 
-**Imports** — what kind of write operation?
+**Imports** — what kind of write operation? (The `bulk_load` rows apply only to Snowflake, BigQuery and NSAW.)
 
 | Pattern | queryType | What to configure |
 |---|---|---|
@@ -70,15 +70,15 @@ For Snowflake, use fully qualified names: `database.schema.table` (unless the co
 
 ### 3. Write the SQL
 
-Follow the database-specific [dialect patterns](#dialect-patterns) below. Use `{{{record.fieldName}}}` for runtime values.
+Follow the database-specific [dialect patterns](#dialect-patterns) below. Inject runtime values with `{{record.fieldName}}` for strings and dates and `{{{record.fieldName}}}` for numbers and identifiers (see [Key syntax rules](#key-syntax-rules)).
 
 ### 4. Validate before handing off
 
 Phase 1 cannot run the query directly. Before giving the user the final SQL:
 
 - Walk the query mentally with a sample record from the upstream export.
-- Confirm the dialect matches the connection's `type` (MERGE syntax differs by dialect).
-- Verify each `{{{record.x}}}` corresponds to a field present in the source data — if you have a recent job for the upstream flow, call `get_job_errors` to see actual record shapes from any failed records.
+- Confirm the dialect matches the connection's `rdbms.type` or `jdbc.type` (MERGE syntax differs by dialect).
+- Verify each `record.x` path corresponds to a field present in the source data — if you have a recent job for the upstream flow, call `get_job_errors` to see actual record shapes from any failed records.
 - Tell the user to paste the SQL into the export's `rdbms.query` (or import's `rdbms.query[]`) field via the integrator.io UI, then run the flow once to confirm. Phase 2 update tools (`update_export`, `update_import`) will apply changes directly when they ship.
 
 ## Export Query Patterns
@@ -157,7 +157,7 @@ HAVING SUM(total) > 1000
 
 ## Import Query Patterns
 
-All import queries use `{{{record.fieldName}}}` to inject values from incoming records. The `query` field is an **array of strings**.
+All import queries inject values from incoming records with `record.` paths — `{{ }}` for strings and dates (quoted and escaped for you), `{{{ }}}` for numbers. The `query` field is an **array of strings**.
 
 ### INSERT (per_record)
 
@@ -263,7 +263,7 @@ Column mapping comes from `mappings[]` on the import (Mapper 2.0). Each mapping'
 
 ### Bulk load with auto-generated MERGE
 
-For high-volume upsert on Snowflake or Azure Synapse, use `bulkLoad` with `primaryKeys`:
+`bulk_load` is available for Snowflake, BigQuery and NSAW; don't offer it on other databases (Azure Synapse, Redshift, SQL Server, MySQL, PostgreSQL). There, use `bulk_insert` for pure inserts and `per_page` or `per_record` SQL for updates and upserts. On a supported database, a high-volume upsert uses `bulkLoad` with `primaryKeys`:
 
 ```json
 {
@@ -467,8 +467,7 @@ SELECT * FROM orders WHERE status = 'ACTIVE'
 SELECT customer_id, LISTAGG(product_name, ', ') WITHIN GROUP (ORDER BY product_name)
 FROM order_items GROUP BY customer_id
 
--- COPY-oriented — bulk_load uses Redshift COPY under the hood
--- For custom merge logic, use overrideMergeQuery with staging table reference
+-- No bulk_load on Redshift: bulk_insert for pure inserts, per_page or per_record SQL for upserts
 ```
 
 ## Pre-Submit Checklist
@@ -482,14 +481,14 @@ FROM order_items GROUP BY customer_id
 
 ### Import queries
 - [ ] **`query` is an array of strings** — `["INSERT INTO ..."]`, not `"INSERT INTO ..."`.
-- [ ] **`queryType` matches the operation** — `["per_record"]` for UPDATE/UPSERT, `["bulk_insert"]` for pure INSERT, `["bulk_load"]` for high-volume.
+- [ ] **`queryType` matches the operation** — `["per_record"]` for UPDATE/UPSERT, `["bulk_insert"]` for pure INSERT, `["bulk_load"]` for high-volume on Snowflake, BigQuery or NSAW.
 - [ ] **All `record.` paths match incoming data** — confirm by walking the upstream export's `mockOutput` / sample records.
 - [ ] **Strings and dates use double braces, numbers and identifiers use triple** — `{{record.name}}` vs `{{{record.id}}}`, with no quotes of your own around either.
 - [ ] **Uses `record.` prefix** — not bare `fieldName` or `data.fieldName`.
 - [ ] **`bulkInsert` / `bulkLoad` not set alongside `query`** — these are mutually exclusive with the `query` field (except `overrideMergeQuery`).
 
 ### Cross-resource
-- [ ] **Connection type is RDBMS** — `type` on the connection matches one of: mysql, mariadb, postgresql, mssql, azuresynapse, oracle, snowflake, bigquery, redshift.
+- [ ] **Connection takes SQL** — `type` is `rdbms` and `rdbms.type` names the database (mysql, mariadb, postgresql, mssql, azuresynapse, oracle, snowflake, bigquery, redshift). JDBC connections (`type: "jdbc"`, with `jdbc.type` such as netsuitejdbc, db2, workday or databricks) also take SQL: exports in `jdbc.query` (plus `jdbc.once.query` for once exports), imports in `jdbc.query` according to `jdbc.queryType`.
 - [ ] **SQL dialect matches the database** — MERGE syntax differs between Snowflake, SQL Server, Oracle, PostgreSQL.
 
 ## Gotchas

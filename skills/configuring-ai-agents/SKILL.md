@@ -43,7 +43,7 @@ Safety and compliance checks applied to data flowing through integrations. Three
 
 Guardrails do not require a `_connectionId` unless using BYOK for the `ai_agent` sub-type.
 
-**AI agent vs guardrail:** pick by what the LLM produces. A guardrail renders a fixed **verdict** (`flagged: true|false` plus reasoning) that the parent's routing branches on -- reach for it when the user says "verify / check / validate / flag / screen". An AI agent step does **work** whose output flows onward as data -- reach for it when the user says "classify / extract / generate / summarize / decide". Guardrails flag; they never block on their own -- the parent flow/API/tool decides what happens to flagged records (see [configuring-guardrails](../configuring-guardrails/SKILL.md)).
+**AI agent vs guardrail:** pick by what the LLM produces. A guardrail renders a **verdict** (`flagged: true|false`) that the parent's routing branches on -- reach for it when the user says "verify / check / validate / flag / screen". An AI agent step does **work** whose output flows onward as data -- reach for it when the user says "classify / extract / generate / summarize / decide". Guardrails flag; they never block on their own -- the parent flow/API/tool decides what happens to flagged records (see [configuring-guardrails](../configuring-guardrails/SKILL.md)).
 
 ## Quick Reference
 
@@ -91,10 +91,12 @@ An AI agent step receives an in-flight record and maps parts of it into one of f
 |---|---|---|
 | `text` | string | Free text for the model to reason over. The most common input |
 | `record` | object or array | The full structured record (or part of it) as JSON. Use when the model needs to see multiple fields together |
-| `files` | array of `{ name, blobKey }` | File references. Text files are sent inline; images and PDFs are converted to a pre-signed URL the model fetches; other file types error |
+| `files` | array of `{ name, blobKey }` | File references. Which types the model can read depends on the account's document-processing setting (below the table) |
 | `conversationHistoryId` | string | Stable per-conversation identifier that retains and replays history across runs (see [Conversation History](#conversation-history)) |
 
 If no input mapping is defined, the agent receives the un-mapped in-flight record as `record` by default.
+
+What `files` can read depends on the account's **Intelligent document processing** setting (My Account > Company > AI settings). It's off by default and account-wide; only an owner or administrator can change it, in the UI; and an API token can't read it, so ask the user. With it off, the model's own file support decides: PDFs, PNG, JPG and WEBP images, and text are supported, and other types can fail the record (TIFF does). With it on, Celigo extracts text and tables from PDFs, scans and office files before the model sees them, and charges the extraction in AI credits.
 
 ### Output Formats
 
@@ -125,6 +127,8 @@ The response-mapping dropdown only shows the response field the chosen output fo
 ### 1. Determine the task
 
 What should the AI model do with each record? Common patterns: classification (sentiment, routing), extraction (invoice parsing, address normalization), validation (business rules), generation (translations, summaries), enrichment (web search augmentation). The task determines the provider, model, output format, and whether tools are needed.
+
+Decide, too, which records need the model at all. An input filter on the agent step (`filter`, as on any import; see [configuring-filters](../configuring-filters/SKILL.md#import-filter-import-filter)) skips the model for the rest, and it is the cheapest cost control. Skipped records still continue down the flow with the agent's response-mapped fields empty, so give every later step that writes those fields its own filter, such as `["notempty", ["string", ["extract", "ai_category"]]]`.
 
 ### 2. Check for existing patterns
 
@@ -237,6 +241,8 @@ Read [guardrail.yml](references/schemas/guardrail.yml) for all configuration opt
 
 ## CLI Commands
 
+Invoking a saved agent, or previewing an agent document (`invoke` with no id, given `{"import": <agent document>, "data": [records]}`), creates no job, but it is a real run: the model is called and billed (in AI credits on Celigo AI; the key's owner pays on BYOK), and its tools (MCP servers, Celigo Tools, web search) act for real. Invoke an agent whose tools can write only with the user's go-ahead. To test the flow around it without calling the model, give the agent a `mockResponse` and test-run the flow (`celigo flows test-run <flowId> --export <exportId>`).
+
 ```bash
 # CRUD -- AI Agents
 celigo ai-agents list
@@ -246,7 +252,7 @@ celigo ai-agents update <id> < agent.json
 celigo ai-agents set <id> key=value [key2=value2 ...]
 celigo ai-agents delete <id> [-y]
 
-# Invoke (test without creating a job)
+# Invoke: no job, but a real, billed run whose tools act
 echo '[{"text":"classify this"}]' | celigo ai-agents invoke <id>
 
 # Clone and connection management
@@ -265,7 +271,7 @@ celigo guardrails update <id> < guardrail.json
 celigo guardrails set <id> key=value [key2=value2 ...]
 celigo guardrails delete <id> [-y]
 
-# Invoke (test without creating a job)
+# Invoke: no job, but a real run (an ai_agent guardrail calls the model and is billed)
 echo '[{"text":"check this content"}]' | celigo guardrails invoke <id>
 
 # Clone and connection management
@@ -312,7 +318,7 @@ celigo templates marketplace
 4. **`json_schema` output without a schema definition returns unpredictable JSON.** Always define `jsonSchema` when using `json_schema` output format.
 5. **Response mapping is on the flow, not the agent.** AI responses are available via `_json` in the flow's `pageProcessors[]` response mapping. Putting mapping config on the agent itself has no effect.
 6. **MCP tool connections must be type `mcp`.** Regular HTTP connections cannot be used as `_mcpConnectionId` even if they point to an MCP server URL.
-7. **`maxOutputTokens` defaults to 1000.** For complex extractions or long-form generation, increase this or the response will be truncated silently.
+7. **Output is capped at 5000 tokens unless you set it.** An OpenAI agent created without `maxOutputTokens` is saved with 5000, and the schema gives Gemini's and Anthropic's `maxCompletionTokens` the same default. Raise it for long extractions (the schema allows up to 128000; the model's own limit may be lower). A guardrail gets no server-written cap.
 8. **An unhosted model saves but fails at run time.** On Celigo AI (no BYOK connection) the model must be one the platform hosts for that provider. The save doesn't check it -- nothing is swapped or corrected -- and the agent's first run fails with 422 `invalid_model`, whose message lists the hosted models. With BYOK, the model string passes through to the provider as-is.
 9. **Unmapped inputs default to `record`.** With no input mapping defined, the entire in-flight record is passed to the agent as `record`. Convenient for prototypes, but map `text`, `record`, or `files` explicitly for precise control over what the model sees.
 
@@ -321,7 +327,7 @@ celigo templates marketplace
 | Error | Cause | Fix |
 |-------|-------|-----|
 | 422 `adaptorType invalid` | Wrong case | Use `AiAgentImport` or `GuardrailImport` exactly |
-| Truncated AI response | `maxOutputTokens` too low | Increase to match expected response size |
+| Truncated AI response | Output cap too low: `maxOutputTokens` (OpenAI) or `maxCompletionTokens` (Gemini, Anthropic), 5000 unless set | Raise it to fit the expected response, up to 128000 |
 | Empty or nonsensical output | Missing or vague instructions | Write specific instructions with expected input/output format |
 | `_mcpConnectionId invalid` | Wrong connection type | Use an MCP connection, not HTTP |
 | 422 `invalid_model` on the first run | Model the platform doesn't host, on Celigo AI credentials (the save doesn't check) | Use a model the error message lists, or add a BYOK connection |

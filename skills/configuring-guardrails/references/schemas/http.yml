@@ -425,11 +425,6 @@ Http:
       type: array
       items:
         type: [string, 'null']
-      x-celigo-canon:
-        decision: stricter-than-server
-        reason: The server also accepts a bare string (normalized to a one-element array) and object entries, but an object entry is stored as-is and does not render as a request body. Only template strings are supported.
-        method: live-probe
-        verified: '2026-09-13'
       description: |-
         Request body template for the import — an array of Handlebars template strings
         positionally aligned with the `method` array (e.g. `["{{{record}}}"]`). A `null`
@@ -459,7 +454,10 @@ Http:
           the Import's mapping step runs first and shapes the source record,
           then this template renders against that mapped record.
           Reference the mapped record with the ``record`` root when wrapping it (e.g.
-          ``{"requestData": {{{jsonSerialize record}}}}``).
+          ``{"requestData": {{{jsonSerialize record}}} }``).
+          Keep a literal ``}`` apart from a closing ``}}`` or ``}}}`` (a space is enough): the save
+          accepts ``{{{jsonSerialize record}}}}``, but every record then fails with
+          ``handlebars_template_parse_error``.
           Avoid bare ``{{{jsonSerialize record}}}`` with no wrapper — leave the field undefined instead.
           Also avoid wrapping a single post-mapped scalar field in ``jsonSerialize`` (e.g.
           ``{{{jsonSerialize record.<scalar>}}}``) — that pattern is brittle.
@@ -491,30 +489,19 @@ Http:
           would be bare ``{{{jsonSerialize record}}}`` with nothing
           around it, you don't need a template at all.
 
-          Production frequency: roughly 1 in 3 active HTTPImports leaves
-          this field empty (~35% null / empty array); closer to 1 in 2
-          once you count the additional ~12% of body entries that are
-          blank strings.  The dominant case is "no body template".
-
           Leave undefined for:
           - REST APIs accepting JSON CRUD payloads (the destination
             already wants exactly the post-mapped record shape).
-          - GraphQL destinations — do NOT author the body template here.
-            The dedicated GraphQL specialist owns the
-            ``{query, operationName, variables}`` shape and routes the
-            post-mapped record into ``variables`` automatically.  Roughly
-            96% of all wrapped-``jsonSerialize record`` uses in production
-            are GraphQL mutations; every one of those should go through
-            the GraphQL specialist, not through this body template.
           - Any case where the destination wants the mapped record as-is.
-        - |-
-          ## SET THIS FIELD when one of the production patterns below applies
 
-          Production grounds these patterns: 36,445 active body entries
-          across HTTPImports in the last 30 days (Celigo-internal users
-          excluded).  Choose the pattern that fits the destination's
-          shape, then write marker ``instructions`` describing intent
-          (let the Handlebars specialist produce the literal template).
+          GraphQL destinations are different: the body is the stringified
+          ``{query, operationName, variables}`` envelope described under
+          ``formType``, with the post-mapped record passed in
+          ``variables``.
+        - |-
+          ## SET THIS FIELD when one of the patterns below applies
+
+          Choose the pattern that fits the destination's shape.
 
           ### Pattern A — ``{{{jsonSerialize record}}}`` inside a static wrapper
 
@@ -526,25 +513,23 @@ Http:
           destination's field shape; the body owns the transport-level
           scaffolding.
 
-          Production frequency: roughly 115 / 36,445 (0.3%) of body
-          entries when the destination is non-GraphQL.  Rare but real;
-          the use cases that fit are obvious when the user describes
-          them ("wrap each request in a SQS-style message envelope",
-          "add a batch header with timestamp + interface name", etc.).
+          Rare for non-GraphQL destinations, but real; the use cases
+          that fit are obvious when the user describes them ("wrap each
+          request in a SQS-style message envelope", "add a batch header
+          with timestamp + interface name", etc.).
 
-          Real production shapes:
+          Typical shapes:
           - Message-bus envelope:
-            ``{"MessageBody": {"class": "EntityUpdate", "payload": {{{jsonSerialize record}}}}}``
+            ``{"MessageBody": {"class": "EntityUpdate", "payload": {{{jsonSerialize record}}} }}``
           - Metadata wrap:
-            ``{"batchNumber": "{{timestamp dateTimeFormat CST}}", "interfaceType": "...", "requestData": {{{jsonSerialize record}}}}``
+            ``{"batchNumber": "{{timestamp dateTimeFormat CST}}", "interfaceType": "...", "requestData": {{{jsonSerialize record}}} }``
           - Named single-record array wrap (when destination wants ``[record]`` but each request sends one):
             ``{"products": [{{{jsonSerialize record}}}]}``
 
           NEVER emit BARE ``{{{jsonSerialize record}}}`` with no wrapper.
           The platform sends the post-mapped record as JSON automatically
           when body is undefined; bare ``jsonSerialize record`` produces
-          identical wire output and shows up in 0.7% of production body
-          entries — every one of those is redundant config the user has
+          identical wire output, so it is redundant config the user has
           to maintain for zero benefit.
 
           ### Pattern B — Batch / page wrapper around mapped records
@@ -578,7 +563,7 @@ Http:
           current ``{{#each data}}`` item.
 
           Example shape:
-          ``{"header": {"sellerId": "{{connection.http.unencrypted.sellerId}}"}, "messages": [{{#each data}}{"sku": "{{sku}}", "qty": {{quantity}}}{{/each}}]}``
+          ``{"header": {"sellerId": "{{connection.http.unencrypted.sellerId}}"}, "messages": [{{#each data}}{"sku": "{{sku}}", "qty": {{quantity}} }{{/each}}]}``
         - |-
           ## Anti-pattern — DO NOT wrap a post-mapped scalar in jsonSerialize
 
@@ -591,15 +576,14 @@ Http:
           anti-pattern is the ``jsonSerialize`` wrap, not any particular
           path shape.
 
-          - Production frequency: 15 / 36,445 (0.04%) — essentially never.
+          - Essentially never needed.
           - Failure mode: the body validator sees the PRE-mapped sample
             shape, can't resolve the post-mapped path during validation,
             and ``jsonSerialize`` on an unresolved path raises
             ``Helper {{jsonSerialize}} expects an argument`` — the
             template fails validation even when it would render at
-            runtime.  The specialist enters a retry loop, tries variations
-            (``getValue`` wrappers, alternate paths), and converges on
-            failure.
+            runtime.  Variations (``getValue`` wrappers, alternate paths)
+            fail the same way.
 
           If you find yourself wanting to reference a per-field
           post-mapped scalar wrapped in ``jsonSerialize``, your situation
@@ -662,19 +646,9 @@ Http:
             before choosing: form-data APIs get the parts array above;
             multipart/related APIs get the hand-authored document. Never
             mix the two shapes in one body.
-        - |-
-          ## Marker instructions style
-
-          When emitting a ``$agent: handlebars`` marker at this field,
-          write the ``instructions`` as INTENT (what the body should
-          produce: destination fields, shape, encoding), not as literal
-          Handlebars syntax.  Embedding literal ``{{{jsonSerialize record.X}}}``
-          in the instructions risks the specialist following it verbatim
-          even when a simpler template would work — one of the ways the
-          per-field anti-pattern above gets introduced.
       examples:
         - ['{"name": "{{record.name}}", "email": "{{record.email}}"}']
-        - ['{"requestData": {{{jsonSerialize record}}}}']
+        - ['{"requestData": {{{jsonSerialize record}}} }']
         - ['{"values": [{{#each batch_of_records}}{{{jsonSerialize this.record}}}{{#unless @last}},{{/unless}}{{/each}}]}']
       x-celigo-agent:
         - handlebars
@@ -761,9 +735,7 @@ Http:
         - |-
           The value MUST match the ``name`` of a lookup entry in ``http.lookups``.
           The lookup config itself (HTTP path, method, extract,
-          fallback chain) is authored separately — typically by the LookupsAgent
-          specialist via a ``$agent:
-          lookup`` marker.
+          fallback chain) is defined separately, in that entry.
         - |-
           ## Mutually exclusive with ``existingExtract``
 
@@ -1150,9 +1122,7 @@ Http:
 
         The referenced helper bundles the polling config plus a required status
         export (polled to check progress) and a result export (fetches the
-        final payload). An import configured with an async helper cannot carry
-        its own transform, output filter, or preSavePage hook — put that
-        processing in the result export instead.
+        final payload).
       examples:
         - 60a2c4e6f321d800129a1a3c
       x-celigo-agent:
@@ -1231,15 +1201,14 @@ Http:
 
           The Celigo platform persists lookups in TWO locations on an HTTP
           import: top-level ``lookups`` and ``http.lookups``.  Both arrays
-          MUST hold byte-for-byte identical content.  The import engine
-          and the MappingsAgent both maintain this mirror on every save —
-          callers never have to write both manually.
+          MUST hold byte-for-byte identical content, so write both on
+          every save.
         - |-
           ## Static vs dynamic vs cached
 
           - **Static** — only ``map`` + optional ``default``.  No HTTP
             request issued.  Use for small controlled vocabularies.
-          - **Dynamic** — ``method`` + ``relativeURI`` (+ ``postBody``,
+          - **Dynamic** — ``method`` + ``relativeURI`` (+ ``body``,
             ``headers``, ``extract``).  Issues a live HTTP request per
             lookup.  Adds one HTTP request per record at runtime — factor
             this into flow design for high-volume syncs.
@@ -1277,14 +1246,22 @@ Http:
               inject values from the incoming record — e.g.
               ``/customers?email={{{email}}}`` or
               ``/accounts/{{{accountId}}}``.
-          postBody:
+          body:
             type: string
             x-celigo-agent:
               - handlebars
             description: |
-              Request body template for POST / PUT / PATCH lookup methods.
-              Typically a JSON string with Handlebars placeholders —
-              ``{"email":"{{{email}}}"}``. Ignored for GET / DELETE.
+              Request body template for POST / PUT / PATCH lookup methods, typically
+              a JSON string with Handlebars placeholders (``{"email":"{{{email}}}"}``);
+              ignored for GET / DELETE. The record's fields sit at the top level:
+              ``{{email}}`` renders the record's value, while ``{{record.email}}``
+              renders empty.
+            x-celigo-ai-guidance:
+              - >-
+                Put the lookup's request template here, not in ``postBody``: a
+                ``postBody`` saves without an error but is not kept under
+                ``http.lookups``, so the lookup goes out with no body and the run
+                reports no error.
           headers:
             type: array
             items:

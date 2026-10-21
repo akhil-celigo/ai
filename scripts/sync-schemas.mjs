@@ -14,11 +14,19 @@
  *     from request.yml lands next to request.yml.
  *  3. Otherwise `references/<dir>-schemas/`, <dir> naming the IAS directory: `common/schemas`
  *     → `common-schemas`, `guardrail/components/schemas` → `guardrail-schemas`.
- * Files are copied verbatim apart from $ref paths, which are rewritten to run from where the file
- * lands to where the target lands (`../../../common/schemas/filter.yml` → `../common-schemas/filter.yml`);
- * a ref that already resolves stays as written. The map's `referenced` object records every file
- * pulled in this way — the sync writes it, never edit it by hand — and a file that drops out of
- * it is deleted.
+ * Files are copied verbatim apart from three changes:
+ *  - x-internal nodes are stripped the way integrator-api-specs' public bundle build strips them
+ *    (Redocly's `remove-x-internal` decorator; see stripInternal in yaml-blocks.mjs), before
+ *    their refs are followed, so nothing only an internal property points at is pulled in.
+ *  - Every `x-celigo-*` key outside PUBLIC_VENDOR_KEYS (lint-schemas.mjs) is deleted (stripKey):
+ *    `x-celigo-canon` records (validation-decision notes for spec maintainers), as upstream's
+ *    `celigo/strip-canon` decorator deletes them from the bundles. A key upstream adds is
+ *    stripped until it's listed there.
+ *  - $ref paths are rewritten to run from where the file lands to where the target lands
+ *    (`../../../common/schemas/filter.yml` → `../common-schemas/filter.yml`); a ref that already
+ *    resolves stays as written.
+ * The map's `referenced` object records every file pulled in through a $ref — the sync writes it,
+ * never edit it by hand — and a file that drops out of it is deleted.
  *
  * Guards — any failure stops the run before it writes anything:
  *  1. Every mapped source and every $ref target must exist at the ref — a rename/removal upstream
@@ -26,22 +34,23 @@
  *  2. Every source domain must be published (present in the IAS `dist` ref, which holds the
  *     x-internal-filtered public bundles) — internal specs must never ship in skills. Shared
  *     component directories (`common`) belong to no API and have no bundle of their own.
- *  3. No file the sync writes may carry `x-internal: true` — the public bundles strip those
- *     properties, so a verbatim copy would publish them.
- *  4. Every fetched file must pass lint-schemas.mjs — a poisoned regeneration upstream
- *     (e.g. the Aug 2026 Mongoose responseMapping leak) stops the sync instead of shipping.
+ *  3. A file carrying `x-internal` or an `x-celigo-*` key the sync strips, with YAML the stripper
+ *     can't outline, is refused rather than risk cutting the wrong lines.
+ *  4. Every file must pass lint-schemas.mjs once stripped — a poisoned regeneration upstream
+ *     (e.g. the Aug 2026 Mongoose responseMapping leak) stops the sync instead of shipping, and so
+ *     does any marker the stripper left behind, or text upstream wrote for its own tooling.
  *  5. No two IAS files may land on one path, and no referenced file on an editorial one.
  *  6. Once the sync is applied, every $ref in every skill must resolve inside its skill
  *     (check-schema-refs.mjs, which the PR workflow also runs).
  * Any schema file on disk that is neither mapped, referenced, nor editorial is reported, so new
  * files get a conscious owner instead of rotting unmanaged.
  *
- * When an upstream file is known-bad (spec bug filed, fix pending, or an x-internal property),
- * move its entry to the map's `quarantined` object with the source, the reason, and the fix PR —
- * the file is left untouched and reported on every run, and everything else keeps syncing. A
- * referenced file is quarantined the same way, at the path rule 2 or 3 gives it and with its $ref
- * paths written for that spot (guard 6 checks them). Move the entry back to `synced` (or delete
- * it, for a referenced file) when the upstream fix merges.
+ * When an upstream file is known-bad (spec bug filed, fix pending), move its entry to the map's
+ * `quarantined` object with the source, the reason, and the fix PR — the file is left untouched
+ * and reported on every run, and everything else keeps syncing. A referenced file is quarantined
+ * the same way, at the path rule 2 or 3 gives it and with its $ref paths written for that spot
+ * (guard 6 checks them). Move the entry back to `synced` (or delete it, for a referenced file)
+ * when the upstream fix merges.
  *
  * Usage: node scripts/sync-schemas.mjs --ias <integrator-api-specs checkout>
  *          [--ref origin/main] [--dist-ref origin/dist] [--check]
@@ -52,11 +61,18 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import { dirname, join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { extractRefs, findDanglingRefs, rewriteRefs } from "./check-schema-refs.mjs";
-import { lintText } from "./lint-schemas.mjs";
+import { isStrippedVendorKey, lintText } from "./lint-schemas.mjs";
+import { isInternal, nodeAt, parseBlocks, refOf, stripInternal, stripKey } from "./yaml-blocks.mjs";
 
 // IAS directories under specs/v1 that hold shared components rather than an API of their own.
 const SHARED_COMPONENT_DIRS = new Set(["common"]);
-const X_INTERNAL = /^[ \t]*x-internal:[ \t]*true\b/m;
+const INTERNAL_FLAG = "x-internal";
+
+/** The first x-internal flag or stripped `x-celigo-*` key mentioned in a file, if any. */
+const strippedMarkerIn = (text) =>
+	[...text.matchAll(/x-internal|x-celigo-[\w-]+/g)]
+		.map((m) => m[0])
+		.find((m) => m === INTERNAL_FLAG || isStrippedVendorKey(m));
 
 const skillOf = (aiPath) => aiPath.split("/")[1];
 const domainOf = (iasPath) => iasPath.split("/")[2];
@@ -105,6 +121,24 @@ function landingPath(skill, iasPath, homes) {
 	return posix.join(dir, posix.basename(iasPath));
 }
 
+/** Whether a $ref written in `fromIasPath` lands, through any chain of $refs, on a flagged node. */
+function refsInternalNode(ias, fromIasPath, { file, pointer }, seen = new Set()) {
+	const target = file ? resolveFrom(fromIasPath, file) : fromIasPath;
+	if (seen.has(`${target}${pointer}`) || !ias.has(target)) return false;
+	seen.add(`${target}${pointer}`);
+	const node = nodeAt(ias.outline(target), pointer);
+	if (node === null) return false;
+	if (isInternal(node)) return true;
+	const next = refOf(node);
+	return next !== null && refsInternalNode(ias, target, next, seen);
+}
+
+/** Upstream text minus x-internal nodes and every `x-celigo-*` key the skills don't ship. */
+function publicText(ias, iasPath) {
+	const withoutInternal = stripInternal(ias.read(iasPath), (ref) => refsInternalNode(ias, iasPath, ref));
+	return stripKey(withoutInternal, isStrippedVendorKey);
+}
+
 /** Fetch a file the sync will write; on a guard failure, record why and return null. */
 function fetchChecked(ias, aiPath, iasPath, via, errors) {
 	const what = via ? `$ref target ${iasPath} (from ${via})` : `source ${iasPath}`;
@@ -118,11 +152,16 @@ function fetchChecked(ias, aiPath, iasPath, via, errors) {
 		errors.push(`${aiPath}: ${what} is in domain '${domain}', which has no dist bundle (internal?)`);
 		return null;
 	}
-	const content = ias.read(iasPath);
-	const problems = lintText(content).map((hit) => `fails lint: ${hit}`);
-	if (X_INTERNAL.test(content)) problems.push("has an x-internal property — quarantine it");
-	for (const problem of problems) errors.push(`${aiPath}: ${what} ${problem}`);
-	return problems.length > 0 ? null : content;
+	const unplaced = ias.outline(iasPath).unparsed;
+	const marker = strippedMarkerIn(ias.read(iasPath));
+	if (marker && unplaced.length > 0) {
+		errors.push(`${aiPath}: ${what} has ${marker} and YAML the stripper can't outline (line ${unplaced[0] + 1})`);
+		return null;
+	}
+	const content = publicText(ias, iasPath);
+	const hits = lintText(content);
+	for (const hit of hits) errors.push(`${aiPath}: ${what} fails lint: ${hit}`);
+	return hits.length > 0 ? null : content;
 }
 
 function claimLanding(layout, skill, target, editorial, errors) {
@@ -160,7 +199,7 @@ function planSkill(skill, entries, { ias, editorial, errors }) {
 		if (sources.has(iasPath)) continue;
 		// A quarantined file keeps its local copy, but its upstream refs still say what it needs.
 		const content = quarantined.has(iasPath)
-			? (ias.has(iasPath) ? ias.read(iasPath) : "")
+			? (ias.has(iasPath) ? publicText(ias, iasPath) : "")
 			: fetchChecked(ias, layout.dest.get(iasPath), iasPath, via, errors);
 		sources.set(iasPath, content);
 		if (content === null) continue;
@@ -190,7 +229,8 @@ const sortedObject = (entries) => Object.fromEntries([...entries].sort(([a], [b]
 
 /**
  * Plan a sync without touching disk.
- * `ias` reads the upstream ref: `{ ref, has(path), read(path), isPublished(domain) }`.
+ * `ias` reads the upstream ref: `{ ref, has(path), read(path), outline(path), isPublished(domain) }`,
+ * where `outline` is yaml-blocks' parseBlocks of the file.
  * `localFiles` maps every yml under skills/ (repo-relative) to its text.
  * Returns the content of every file the sync owns (`files`), the paths to delete (`deletes`), the
  * new `referenced` map section, schema files nobody owns (`unmanaged`), and `errors`.
@@ -241,11 +281,13 @@ function gitIas(iasDir, ref, distRef) {
 			return cache.get(key);
 		};
 	};
+	const read = cached((path) => git("show", `${ref}:${path}`));
 	return {
 		ref,
 		sha: () => git("rev-parse", "--short", ref).trim(),
 		has: cached((path) => exists(`${ref}:${path}`)),
-		read: cached((path) => git("show", `${ref}:${path}`)),
+		read,
+		outline: cached((path) => parseBlocks(read(path))),
 		// dist bundles are named <domain>.yml.
 		isPublished: cached((domain) => exists(`${distRef}:${domain}.yml`)),
 	};
@@ -332,4 +374,4 @@ function main() {
 	if (checkOnly) process.exit(1);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

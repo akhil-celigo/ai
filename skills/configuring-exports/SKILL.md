@@ -46,16 +46,21 @@ Receive data pushed to Celigo from an external system. No polling, no scheduling
 - `WebhookExport` -- inbound HTTP listener (no connection required)
 - `AS2Export` -- AS2 EDI file reception
 - Distributed exports (`type: "distributed"`) -- real-time listeners for NetSuite and Salesforce. NetSuite: saving the export deploys a Celigo user event script on the record type (the account needs the Celigo SuiteApp or bundle). Salesforce: saving creates nothing in Salesforce -- the org needs the Celigo managed package plus an Apex trigger on each object that calls it. Integration Apps create their triggers at installation; for a custom flow the customer deploys the trigger, starting from the code the export page shows under Required trigger. `celigo connections ping --distributed <connectionId>` checks that the package or SuiteApp responds.
-- Change data capture (`type: "stream"`) -- MongoDB change streams that tail the oplog for real-time record changes.
+- Change data capture (`type: "stream"` plus a `cdc` object) -- streams database changes as they happen: MongoDB change streams (`MongodbExport`), and SQL Server CDC or PostgreSQL logical replication (`RDBMSExport`). A CDC export has no query. The RDBMS form watches `rdbms.tables` (`database.schema.table` on SQL Server, `schema.table` on PostgreSQL) or, on PostgreSQL only, `cdc.publicationName` instead -- set one, not both. Every CDC export must resolve a snapshot mode (`cdc.snapshotMode`, or a `snapshot.mode` entry in `cdc.properties`), and a MongoDB one a capture mode too (`cdc.captureMode`, or a `capture.mode` entry). See [cdc.yml](references/schemas/cdc.yml).
+- Topic listeners (`adaptorType: "TopicExport"`, `type: "stream"`) -- consume what is published to the Event Streams topic in `topic._topicId`. No `_connectionId` and no `cdc` object: with a connection, the save validates the export as that connection's adaptor and fails. Without `type: "stream"` the export saves but runs as a batch export and never starts on a publish; a PATCH can't add the type later, so update the full document with it, then disable and re-enable the flow. A topic listener can't be a lookup. See [topic.yml](references/schemas/topic.yml).
 
-**When to use:** The source system supports outbound webhooks, push notifications, or change data capture and you want real-time processing.
+`type: "stream"` is accepted only on those three adaptors (`MongodbExport`, `RDBMSExport` on SQL Server or PostgreSQL, `TopicExport`); every other adaptor rejects the save with `unsupported_export_type`.
+
+**A listener is switched by its flow.** `netsuite.distributed.disabled` is maintained by the platform; pause a NetSuite listener by disabling its flow. A topic subscription or a NetSuite listener's deployment becomes active when the flow goes from disabled to enabled -- a flow created already enabled doesn't activate it. Create the flow disabled and enable it afterwards. After repairing a listener export, or when a NetSuite listener stops firing, disable and re-enable the flow (`celigo flows set <flowId> disabled=true`, then `disabled=false`).
+
+**When to use:** The source system supports outbound webhooks, push notifications, or change data capture, or the records arrive on an Event Streams topic, and you want real-time processing.
 
 ### File Transfers
 
 Read files from a remote location, then either parse them into records or transfer them as blobs.
 
 - `FTPExport` / `S3Export` / `FileSystemExport` -- fetch files from FTP/SFTP, S3, or local filesystem
-- `HTTPExport` with `http.type: "file"` -- fetch files over HTTP from cloud storage APIs (Google Drive, Box, Dropbox, Azure Blob Storage). The HTTP connector handles auth; the `file{}` config handles parsing.
+- `HTTPExport` with `http.type: "file"` -- read the files in a cloud storage folder (Google Drive, Box, Dropbox, Azure Blob Storage). On these file-storage connectors it's folder mode: `relativeURI` is a folder path the connector resolves, not an API endpoint -- an API URL there saves cleanly and fails at runtime with "Directory is not found". The connector handles auth; the `file{}` config handles parsing. To fetch one file per record from an API endpoint instead, use a blob lookup (`type: "blob"`, `isLookup: true`) without `http.type: "file"`.
 - `NetSuiteExport` with `netsuite.type: "file"` -- fetch and parse files (CSV, JSON, XLSX, XML, EDI) from the NetSuite file cabinet
 - Parsed mode (`file.output: "records"`) -- CSV, XML, JSON, XLSX, EDI files are parsed into individual records
 - Blob mode (`type: "blob"`) -- binary files transferred as-is without parsing. Supported on HTTPExport, NetSuiteExport, SalesforceExport, FTPExport, and S3Export.
@@ -66,7 +71,7 @@ Read files from a remote location, then either parse them into records or transf
 
 Actively fetch batches of records from an API or database on a schedule.
 
-- `HTTPExport` -- REST/GraphQL APIs
+- `HTTPExport` -- REST and GraphQL APIs (for GraphQL, see [GraphQL APIs](#graphql-apis----the-endpoint-belongs-to-the-connection))
 - `NetSuiteHTTPExport` -- NetSuite's REST APIs on a `netsuite` connection: SuiteQL and REST record endpoints (`nsDomainType: "suitetalk"`) or a custom RESTlet (`nsDomainType: "restlet"`). Nothing has to exist in NetSuite first, so it's the default for NetSuite exports and lookups
 - `NetSuiteExport` -- a saved search (or search criteria) run through Celigo's SuiteApp/bundle RESTlets. Use it when the user names or wants a saved search; it's also the adaptor for NetSuite listeners and file cabinet exports
 - `SalesforceExport` -- SOQL/Bulk queries
@@ -83,18 +88,19 @@ Actively fetch batches of records from an API or database on a schedule.
 | Your data comes from... | Use adaptorType | Category | Read schema |
 |---|---|---|---|
 | REST or GraphQL API | `HTTPExport` | Record-based | [http.yml](references/schemas/http.yml) |
-| Files over HTTP (Google Drive, Box, Dropbox, Azure Blob) | `HTTPExport` with `http.type: "file"` | File transfer | [http.yml](references/schemas/http.yml) + [file.yml](references/schemas/file.yml) |
+| Files in a cloud storage folder (Google Drive, Box, Dropbox, Azure Blob) | `HTTPExport` with `http.type: "file"` | File transfer | [http.yml](references/schemas/http.yml) + [file.yml](references/schemas/file.yml) |
 | NetSuite records (SuiteQL, REST record endpoints, custom RESTlet) | `NetSuiteHTTPExport` + `nsDomainType` | Record-based | [http.yml](references/schemas/http.yml) |
 | NetSuite saved search, listener, or file cabinet | `NetSuiteExport` | Record-based, Listener, or File transfer | [netsuite.yml](references/schemas/netsuite.yml) |
 | Salesforce objects | `SalesforceExport` | Record-based | [salesforce.yml](references/schemas/salesforce.yml) |
-| SQL database | `RDBMSExport` | Record-based | [rdbms.yml](references/schemas/rdbms.yml) |
-| MongoDB | `MongodbExport` | Record-based | [mongodb.yml](references/schemas/mongodb.yml) |
+| SQL database (queries, or CDC on SQL Server and PostgreSQL) | `RDBMSExport` | Record-based or Listener | [rdbms.yml](references/schemas/rdbms.yml) (+ [cdc.yml](references/schemas/cdc.yml) for CDC) |
+| MongoDB (queries or change streams) | `MongodbExport` | Record-based or Listener | [mongodb.yml](references/schemas/mongodb.yml) (+ [cdc.yml](references/schemas/cdc.yml) for change streams) |
 | JDBC database | `JDBCExport` | Record-based | [jdbc.yml](references/schemas/jdbc.yml) |
 | DynamoDB | `DynamodbExport` | Record-based | [dynamodb.yml](references/schemas/dynamodb.yml) |
 | Files on FTP/SFTP | `FTPExport` | File transfer | [ftp.yml](references/schemas/ftp.yml) + [file.yml](references/schemas/file.yml) |
 | Files on S3 | `S3Export` | File transfer | [s3.yml](references/schemas/s3.yml) + [file.yml](references/schemas/file.yml) |
 | Webhooks / push events | `WebhookExport` | Listener | [webhook.yml](references/schemas/webhook.yml) |
 | AS2 EDI messages | `AS2Export` | Listener | [as2.yml](references/schemas/as2.yml) |
+| Event Streams topic | `TopicExport` (`type: "stream"`) | Listener | [topic.yml](references/schemas/topic.yml) |
 | Manual file upload | `SimpleExport` | File transfer | [simple.yml](references/schemas/simple.yml) |
 | Local filesystem | `FileSystemExport` | File transfer | [filesystem.yml](references/schemas/filesystem.yml) + [file.yml](references/schemas/file.yml) |
 | Pre-built stack connector | `WrapperExport` | Record-based | [wrapper.yml](references/schemas/wrapper.yml) |
@@ -113,8 +119,8 @@ Every export needs at minimum:
 
 - `name` -- human-readable label
 - `adaptorType` -- from the matrix above
-- `_connectionId` -- except `WebhookExport` and `SimpleExport`
-- Adaptor config block -- `http{}`, `netsuite{}`, `ftp{}`, `salesforce{}`, `rdbms{}`, etc.
+- `_connectionId` -- except `WebhookExport`, `SimpleExport` and `TopicExport` (a connection on a topic listener fails the save)
+- Adaptor config block -- `http{}`, `netsuite{}`, `ftp{}`, `salesforce{}`, `rdbms{}`, `topic{}`, etc.
 
 ### Which Schemas to Read
 
@@ -145,7 +151,7 @@ All schemas are in [references/schemas/](references/schemas/):
   - [filesystem.yml](references/schemas/filesystem.yml) -- local filesystem
   - [simple.yml](references/schemas/simple.yml) -- data loader / manual upload
 - **File parsing:** [file.yml](references/schemas/file.yml) (CSV, XML, JSON, XLSX, EDI)
-- **Operational modes:** [delta.yml](references/schemas/delta.yml), [webhook.yml](references/schemas/webhook.yml), [distributed.yml](references/schemas/distributed.yml), [once.yml](references/schemas/once.yml)
+- **Operational modes:** [delta.yml](references/schemas/delta.yml), [once.yml](references/schemas/once.yml), [test.yml](references/schemas/test.yml), [webhook.yml](references/schemas/webhook.yml), [cdc.yml](references/schemas/cdc.yml) (database listeners), [topic.yml](references/schemas/topic.yml) (topic listeners). NetSuite and Salesforce listener settings live in `netsuite.distributed` and `salesforce.distributed` ([netsuite.yml](references/schemas/netsuite.yml), [salesforce.yml](references/schemas/salesforce.yml)); [distributed.yml](references/schemas/distributed.yml) holds only the optional `bearerToken` for pushing records into a distributed export
 - **Mock output:** [mock-output.yml](references/schemas/mock-output.yml)
 - **Clone:** [clone-request.yml](references/schemas/clone-request.yml), [clone-response.yml](references/schemas/clone-response.yml)
 
@@ -212,7 +218,7 @@ celigo http-connectors endpoint-detail <id> --resource-type export --resource-id
 celigo tp-connectors list
 ```
 
-If an HTTP connector exists for your target app, create the connection from it (`http._httpConnectorId` -- see [configuring-connections > Check for a pre-built connector and global iClient](../configuring-connections/SKILL.md#4-check-for-a-pre-built-connector-and-global-iclient)) and take the export's `relativeURI`, method, pagination, and response paths from the connector's endpoint metadata rather than reconstructing them from public API docs. The connector-reference fields on the export itself (`http._httpConnectorEndpointId`, `http._httpConnectorVersionId`, `http._httpConnectorResourceId`) are read-only -- the platform sets them; what you control is the connection and the endpoint config you copy from the connector.
+If an HTTP connector exists for your target app, create the connection from it (`http._httpConnectorId` -- see [configuring-connections > Check for a pre-built connector and global iClient](../configuring-connections/SKILL.md#4-check-for-a-pre-built-connector-and-global-iclient)) and take the export's `relativeURI`, method, pagination, and response paths from the connector's endpoint metadata rather than reconstructing them from public API docs. Saving links the export to the connector: when `relativeURI` and `method` match one of its endpoints, the platform sets `http._httpConnectorVersionId`, `http._httpConnectorResourceId` and `http._httpConnectorEndpointId`, replacing pointers that belong to another connector. Pointers for the connection's own connector are kept exactly as sent, even when the URI names a different endpoint. Read the export back after saving (no pointers means the URI matched no endpoint), and when you retarget it to another endpoint, update or drop the old pointers in the same save: the request follows `relativeURI`, but stale pointers keep naming the old endpoint in the editor and in later edits.
 
 If a trading partner connector exists (EDI/AS2), reference it on the export via `ftp._tpConnectorId` (FTP exports) or `as2._tpConnectorId` (AS2 exports). You may also need to set `_ediProfileId` on the export for EDI document validation.
 
@@ -232,7 +238,7 @@ celigo metadata fields <connectionId> <entityType>
 This tells you what data is available to export before you write any configuration.
 
 - **NetSuite:** `metadata types` returns both record types and saved searches (with IDs you need for `netsuite.restlet.searchId`). `metadata fields` returns field IDs, names, types, and group — including sublist fields you'll need for `mapping.lists[].generate` on the import side.
-- **Salesforce:** `metadata types` returns sObjects with queryable/createable flags. `metadata fields` returns fields, types, and relationship names — use these to discover child objects for `distributed.relatedLists[]` and relationship field names for cross-object queries.
+- **Salesforce:** `metadata types` returns sObjects with queryable/createable flags. `metadata fields` returns fields, types, and relationship names — use these to discover child objects for `salesforce.distributed.relatedLists[]` and relationship field names for cross-object queries.
 - **RDBMS:** `metadata types` returns table names. `metadata fields` returns column names and types for a given table — use these when writing SQL queries or building field mappings.
 
 ### 5. Determine the category
@@ -265,7 +271,7 @@ When the request is vague ("sync customers"), confirm which kind of sync is inte
 
 Both are starting steps (see [Three Categories of Export](#three-categories-of-export)); the choice is driven by what the source supports and the latency budget, not preference:
 
-- Reach for a **listener** (`WebhookExport`, or NetSuite/Salesforce `type: "distributed"`) when the source pushes events and the flow needs to react quickly ("when X happens, do Y").
+- Reach for a **listener** (`WebhookExport`, NetSuite/Salesforce `type: "distributed"`, or `type: "stream"` for database CDC and topic listeners) when the source pushes events or streams its changes and the flow needs to react quickly ("when X happens, do Y", "when a row changes").
 - Reach for a **scheduled export** when the source has no push mechanism, or when batch timing at off-peak hours is acceptable.
 
 NetSuite and Salesforce support both for many record types. Mixing them on one flow is a common, good pattern -- a listener handles low-latency reactions while a scheduled export runs as a safety net for backfills, end-of-day reconciliation, and catching up after a webhook outage.
@@ -278,6 +284,12 @@ The distinguishing question is when the data is needed:
 - A **scheduled export** runs once per flow run as a starting point, producing the first batch of records the flow processes.
 
 If the request is "for each X, look up Y", it's a lookup. If it's "every hour, pull all Y", it's a scheduled export.
+
+Three lookup behaviors to plan for before the first test:
+
+- **Finding nothing isn't a failure.** Zero results count as success: the record continues with nothing merged, so `proceedOnFailure` doesn't apply. To fail the record instead on an HTTP lookup, set `http.response.successPath` (without `successValues`) to a path only a match has, such as `results[0].id`; an empty result then fails with `response_failure`. For your own error message, a `preSavePage` hook on the lookup can return one `newErrorsAndRetryData` entry when `options.data` and `options.errors` are both empty. To route instead of fail, response-map `data` and `errors` onto the record and branch on them.
+- **More than one match needs a guard.** When a lookup can match more than one record (a name, email or phone key), guard `data[0]` before it feeds an update -- see [configuring-lookup-caches > Safe Lookup-to-Update](../configuring-lookup-caches/SKILL.md#safe-lookup-to-update----never-write-off-an-unguarded-first-match).
+- **A standalone preview can't render the record.** Any lookup whose request reads the arriving record (`{{record.*}}` in a URI, body, SOQL or SQL query, or a `{{...}}` field in a NetSuite search criterion) fails a standalone preview with `handlebars_template_parse_error` ("... not defined in the model"): neither the export preview nor a virtual export (`exports invoke --connection`) binds a record, even when you send one. That's a preview limitation, not a broken template. Check the lookup in the flow builder's step preview with an upstream record, or in a flow test run (`celigo flows test-run <flowId> --export <sourceExportId>`), which calls the lookup live unless it has a saved `mockOutput` (a test run replays it).
 
 ### One-to-many fan-out -- the array element IS the record
 
@@ -294,7 +306,7 @@ When the arriving record is itself an array -- grouped rows from a `groupByField
 
 Three consequences worth knowing before you debug the wrong thing:
 
-- **The build-time preview warning is expected.** Previewing a fanned-out lookup in isolation reports "`<field>` not defined in the model" because no upstream record is bound yet. That is not a broken template -- don't "fix" a correct `{{record.X}}` reference because of it.
+- **The build-time preview warning is expected.** Previewing a fanned-out lookup in isolation reports "`<field>` not defined in the model" because no upstream record is bound, as for any lookup that reads the record ([Lookup export vs separate scheduled export](#lookup-export-vs-separate-scheduled-export)). That is not a broken template -- don't "fix" a correct `{{record.X}}` reference because of it.
 - **Response mapping merges per element automatically.** To get looked-up values back onto each element, author a normal top-level `fields` response mapping; Celigo merges each result into its corresponding fanned-out element.
 - **Two anti-patterns.** Don't target the array with a `lists` entry (that nests a new array inside each element), and don't attempt the per-element merge in `postResponseMap` (it sees the page of parent records, not per-element results).
 
@@ -319,6 +331,10 @@ Two constraints shape the design: the status and result exports must be ordinary
 
 Reach for an async helper only when the API genuinely forces the fire-and-check-back shape. Adding one to a synchronous API is pure overhead -- extra polling plus a status and result export to maintain.
 
+### GraphQL APIs -- the endpoint belongs to the connection
+
+A GraphQL export is an ordinary `HTTPExport` whose `http.body` is the JSON envelope `{"query", "operationName", "variables"}`; `http.formType: "graph_ql"` only picks the editor, and the same body is sent either way. The GraphQL editor owns `http.relativeURI`: it shows no field for it and rewrites it whenever the export is saved there, so the GraphQL endpoint must be the connection's base URI -- a `graph_ql` connection whose base URI is the endpoint, or a connector connection bound to the connector's GraphQL API. When the connection's base URI stops at an API root, move the export to a connection that supplies the GraphQL endpoint instead of patching `relativeURI`. Keep templated `variables` inside a JSON string so the body stays parseable JSON at rest; otherwise the editor shows every field empty.
+
 ## CLI Commands
 
 ```bash
@@ -330,7 +346,8 @@ celigo exports update <id> < export.json
 celigo exports set <id> key=value [key2=value2 ...]
 celigo exports delete <id>
 
-# Invoke (test-run an export, see what data comes back)
+# Invoke: with <id>, run the saved export against the live source (no job, nothing saved);
+# with a piped document, preview it -- parsed records only, before transform, filter and preSavePage
 celigo exports invoke [id] [--all]
 
 # Clone and connection management
@@ -362,7 +379,8 @@ Before creating or updating an export, verify:
 
 - [ ] **`adaptorType` is exact** -- case-sensitive, matches the [Adaptor Decision Matrix](#adaptor-decision-matrix) (e.g., `HTTPExport`, not `httpExport` or `HttpExport`)
 - [ ] **Pre-built connector was checked** -- for HTTP exports, `celigo http-connectors list` found no connector for the app (or the connector lacks the endpoint) before any hand-written `relativeURI`
-- [ ] **`_connectionId` is valid** -- points to an existing, online connection of the correct type. Not needed for `WebhookExport` or `SimpleExport`
+- [ ] **`_connectionId` is valid** -- points to an existing, online connection of the correct type. Not needed for `WebhookExport` or `SimpleExport`, and never set on `TopicExport`
+- [ ] **Listener `type` is set** -- `type: "distributed"` for NetSuite and Salesforce listeners, `type: "stream"` for CDC and topic listeners (a topic listener saved without it runs as a batch export), and the flow is created disabled, then enabled
 - [ ] **Adaptor config block is present** -- `http{}`, `netsuite{}`, `ftp{}`, etc. matches the `adaptorType`
 - [ ] **`resourcePath` or query is correct** -- wrong path silently returns 0 records with no error
 - [ ] **Pagination is configured** -- for HTTP exports, set `http.paging` if the API returns paginated results
@@ -371,11 +389,11 @@ Before creating or updating an export, verify:
 - [ ] **`mockOutput` format is correct** -- `{ "page_of_records": [{ "record": {...} }] }`, not a plain array
 - [ ] **No `rest:` block** -- `rest:` creates a legacy RESTExport. Use only `http:` for new exports
 - [ ] **Output filter syntax is valid** -- if using an output filter expression, test it against sample data
-- [ ] **Lookup config is complete** -- if `isLookup: true`, ensure response mapping is planned for the flow's `pageProcessors[]` entry
+- [ ] **Lookup config is complete** -- if `isLookup: true`, ensure response mapping is planned for the flow's `pageProcessors[]` entry, and decide what a lookup that finds nothing, or more than one match, should do
 
 ## Gotchas
 
-1. **PUT erases omitted fields.** Always GET first, modify, then PUT. The `set` command handles this.
+1. **PUT erases omitted fields.** Always GET first, modify, then PUT; `celigo exports set` does this for every field except `assistantMetadata` and `debugUntil`, which it PATCHes. One read hides data: an `HTTPExport` saved with an empty `http.relativeURI` and no `http.body` reads back with no `http` block, although the platform still stores and runs it. Don't build an update from that read (`exports set` included) -- it erases the stored request -- so send the complete `http` block yourself. An empty relative URI calls the connection's base URI exactly; `"/"` adds a trailing slash, which is a different URL.
 2. **Including a `rest:` block creates a legacy RESTExport.** Use only `http:` for new exports.
 3. **Wrong `resourcePath` produces 0 records with no error.** First thing to check when an export succeeds but returns nothing.
 4. **`mockOutput` format is `{ "page_of_records": [{ "record": {...} }] }`.** Not a plain array.
@@ -387,6 +405,7 @@ Before creating or updating an export, verify:
 10. **`type: "once"` needs a dedicated, writeable tracking flag.** `once.booleanField` must be writeable by the export's connection, and no other process may update the same field -- a shared flag causes records to be skipped.
 11. **An async-helper export cannot carry its own transform, output filter, or preSavePage hook.** Build that processing into the helper's result export instead. The status and result exports must themselves be plain synchronous exports -- an async helper cannot nest another. See [Async APIs (submit, poll, fetch)](#async-apis-submit-poll-fetch).
 12. **NetSuite REST exports need `adaptorType: "NetSuiteHTTPExport"` and `nsDomainType` sent explicitly.** On a NetSuite connection the server otherwise infers `NetSuiteExport` and rejects the document (422 "netsuite subschema not defined"). `http.relativeURI` carries the full path starting at `/services/rest/...`, and the account needs NetSuite's REST Web Services feature (403 `FEATURE_DISABLED` otherwise -- fall back to a saved search). Don't convert an existing `NetSuiteExport` to REST unless asked.
+13. **The export preview returns parsed records only.** `exports invoke` with a piped document (`POST /v1/exports/preview`) stops after parsing: the export's transform, output filter and preSavePage hook aren't applied there, so untransformed records in a preview don't mean the transform is wrong. Check those in a flow test run's stages, or in the input of the step that follows. A preview body that still carries `mockOutput`, as a document read from the API does, returns that snapshot as a single `parse` stage instead of calling the source: remove `mockOutput` to read live, or invoke the saved export by id, which reads live.
 
 ## Common Errors
 
@@ -397,8 +416,10 @@ Before creating or updating an export, verify:
 | `0 records exported` (no error) | Wrong `resourcePath`, empty date range, or overly restrictive filter | Check `resourcePath`, widen delta window, test without output filter |
 | `Cannot read property of undefined` in preSavePage | Script assumes a field exists that is missing from some records | Add null checks: `if (record.field)` before access |
 | `mockOutput is invalid` | Wrong format -- used array instead of object | Use `{ "page_of_records": [{ "record": {...} }] }` |
+| `handlebars_template_parse_error` ("... not defined in the model") previewing a lookup | A standalone preview binds no record, so a request that reads the record can't render | Not a broken template: check the lookup in the flow builder's step preview or a flow test run |
 | `Invalid adaptorType` | Case mismatch or typo | Use exact casing from the Adaptor Decision Matrix |
 | `Connection is offline` | Connection failed health check | Fix credentials, re-authorize, then `celigo connections ping <id>` |
-| `Rate limit exceeded` / `429` | Too many concurrent requests to the source API | Lower `concurrencyLevel` on the connection; add retry config |
+| `Rate limit exceeded` / `429` | The source API's rate limit was exceeded | With auto-recover on (the default), the connection throttles and retries by itself; to cap it, lower the connection's `targetConcurrencyLevel` (`concurrencyLevel` is platform-managed while auto-recover is on). If the API signals limits another way (another status code or a body field), set the connection's `http.rateLimit`. See [configuring-connections > Auto-recover rate-limit errors](../configuring-connections/SKILL.md#auto-recover-rate-limit-errors) |
 | `Timeout` on large exports | Query returns too much data or API is slow | Add pagination, narrow the date range, or increase timeout settings |
 | `File parsing error` | `file.type` doesn't match actual file format, or delimiter/encoding mismatch | Verify `file.type`, check `file.csv.columnDelimiter`, ensure correct encoding |
+| "Directory is not found" | `http.type: "file"` on a file-storage connector (folder mode) with an API URL in `relativeURI` | Put the folder path in `relativeURI`; to fetch one file per record from an API, use a blob lookup without `http.type: "file"` |

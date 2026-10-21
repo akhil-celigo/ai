@@ -116,14 +116,15 @@ Mappings:
           - `objectarray`: Array of objects (most common array type)
           - `arrayarray`: Array of arrays (for matrix/table structures)
 
-          Array dataTypes can be populated two ways: pass a source array through
-          unchanged via `extract` alone (when the source is already an array of
-          the right shape), or construct/iterate via `buildArrayHelper`.
+          Array dataTypes can be populated three ways: pass a source array
+          through unchanged via a JSONPath `extract` alone (when the source is
+          already an array of the right shape), construct/iterate via
+          `buildArrayHelper`, or set a constant with `hardCodedValue`.
 
           IMPORTANT: The dataType controls which additional fields are relevant:
           - For date-like string fields: extractDateFormat, generateDateFormat, etc. become relevant
           - For object types: 'mappings' array becomes relevant
-          - For array types: `buildArrayHelper` is one option (see above)
+          - For array types: a JSONPath `extract` alone, `buildArrayHelper`, or `hardCodedValue` (see above)
 
           When analyzing existing mappings or generating new ones, always check dataType first
           to understand what additional fields should be present.
@@ -182,9 +183,12 @@ Mappings:
           - Access input record fields with {{record.fieldName}} notation; a grouped
             (array) record binds as `rows` instead — {{rows.0.fieldName}} / {{#each rows}}
           - Examples: "{{record.firstName}} {{record.lastName}}", "{{#if record.isActive}}Active{{else}}Inactive{{/if}}"
-          - Valid on `object`, `objectarray`, and primitive-array dataTypes as
-            well as scalars — the rendered template output must parse into the
-            declared shape
+          - Valid on scalars and on `object` rows, where the rendered output must
+            parse into an object. On an array row the template goes in a
+            `buildArrayHelper` entry instead: on an `objectarray` row's own
+            `extract` it is refused with 422 ("buildArrayHelper" must be present
+            for object array datatype), and on a primitive-array row's own
+            `extract` it renders null without an error
 
           ```json
           "extract": "{{record.price}} {{record.currency}}"  // Combines two fields
@@ -359,6 +363,16 @@ Mappings:
 
           The specific lookup capabilities depend on the context where mappings are used.
         examples: ["countryCodeToName", "statusMapping", "departmentCodes"]
+      hardCodedValue:
+        type: string
+        description: |
+          Constant written to the destination instead of an extracted value. On a primitive
+          array (`stringarray`, `numberarray`, `booleanarray`) the string is split on commas,
+          verbatim and untrimmed, into elements of the array's type (`"A,B"` gives `["A", "B"]`).
+          On an `object` it must be a JSON object string and on an `objectarray` a JSON array
+          string (an object string becomes one element); the save parses it and refuses non-JSON
+          or the wrong shape with 422, and an array row with a constant needs no `buildArrayHelper`.
+        examples: ["USD", "A,B", "[{\"code\": \"A\"}, {\"code\": \"B\"}]"]
       description:
         type: string
         description: |
@@ -412,7 +426,7 @@ Mappings:
           **When to Use**
           - REQUIRED when dataType = "object" (unless you are copying an entire object from the input record)
           - REQUIRED in buildArrayHelper.mappings when defining complex object array elements
-          - NEVER used with simple types (string, number, boolean, date)
+          - NEVER used with simple types (string, number, boolean)
 
           **Behavior**
           - Each mapping in this array becomes a property of the parent object
@@ -479,15 +493,25 @@ Mappings:
             processor renders the entire destination array as null with no
             validation error. To emit a fixed number of static elements, add
             that many sibling constructed entries — never index the extract.
+          - |-
+            An entry's `extract` can be a Handlebars template. On an
+            `objectarray` it must render a JSON object (one element) or a JSON
+            array (one element per item). On a primitive array each entry
+            renders one element, so a serialized array becomes one string
+            element. A bare literal entry extract is refused with 422 ("extract
+            only supports json path or handlebars expression"); set a constant
+            with the row's `hardCodedValue` instead.
         description: |
           **Purpose**
           Configures how to construct arrays in the output record, handling various array types and inputs.
 
           **Guidance**
-          This is the REQUIRED mechanism for ALL array data types:
+          This is the mechanism for building array data types:
 
           **When to Use**
-          - REQUIRED when dataType ends with "array" (stringarray, objectarray, etc.)
+          - REQUIRED when dataType ends with "array" (stringarray, objectarray, etc.), unless the
+            row passes a source array through with a JSONPath `extract` alone or sets
+            `hardCodedValue`
           - Each entry in this array contributes elements to the output array
           - Multiple entries allow combining data from different input arrays
 
@@ -644,14 +668,6 @@ Mappings:
                   for the tab, and an entry sent without it loses the label. Duplicate
                   names across entries are allowed. Set one only when the user names
                   the source object; never invent labels.
-              x-celigo-canon:
-                decision: verified-exact
-                reason: >-
-                  The save stores the value only when it is a non-empty string and omits
-                  the key otherwise; nothing at runtime reads it, and duplicates are not
-                  rejected.
-                method: documented-contract
-                verified: '2026-10-06'
               examples: ["Billing address", "Shipping address"]
             sourceDataType:
               type: string
@@ -717,16 +733,6 @@ Mappings:
                   x-enumDescriptions:
                     extract_not_empty: Include an array element only when the extract returns a non-empty value for it
                     fail_record_when_empty: Fail the record when the entry's source array is missing or empty
-                  x-celigo-canon:
-                    decision: verified-exact
-                    reason: >-
-                      The save accepts both values on an entry with child mappings as well as
-                      on a copy-as-is entry, rejects fail_record_when_empty paired with a
-                      default on the entry ([unsupported_mapping]), and the mapper processor
-                      fails the record with extract_empty when the entry's source array is
-                      missing or empty on either kind of entry.
-                    method: live-probe
-                    verified: '2026-10-09'
                   examples: ["extract_not_empty"]
             mappings:
               type: array
@@ -859,7 +865,7 @@ Mappings:
             no message text) and never cascades or promotes on its own; `Draft`
             descendants are kept as they are, and a `Draft` parent does not gate
             its children. The UI's Set inactive on a parent marks the parent and
-            every child `Inactive` (IO-166197). Re-enabling a child
+            every child `Inactive`. Re-enabling a child
             means re-enabling its ancestors in the same payload. Edits that keep
             existing rows must carry their stored status forward — rewriting a
             `Draft` or `Inactive` row to `Active` turns a row the user parked
@@ -872,16 +878,6 @@ Mappings:
           Active: The mapping is enabled and applied during processing
           Draft: In-progress mapping; saved without the Active-only field validations and skipped at runtime
           Inactive: Disabled by the user; configuration kept, skipped at runtime and in preview
-        x-celigo-canon:
-          decision: verified-exact
-          reason: >-
-            The save validates the value against this enum case-sensitively
-            (`[invalid_status_enums] inactive is not a valid enum for status field.`),
-            and no Active row may sit under an Inactive parent — the server rejects
-            that tree with `[inactive_parent_active_child]` instead of cascading the
-            parent's status down; a Draft child under an Inactive parent is accepted.
-          method: live-probe
-          verified: '2026-10-09'
         examples: ["Active"]
       conditional:
         type: object
@@ -968,16 +964,6 @@ Mappings:
               record_updated: Apply this mapping only when updating an existing record
               extract_not_empty: Apply this mapping only when the extract field returns a non-empty value
               fail_record_when_empty: Fail the record when the extract field returns no value
-            x-celigo-canon:
-              decision: verified-exact
-              reason: >-
-                The save accepts exactly these values and rejects fail_record_when_empty
-                combined with a default, a lookupName or a hardCodedValue on the same row
-                (`[unsupported_mapping]`, one message per pair); the runtime treats null,
-                undefined and the empty string as empty (`extract_empty`, fatal) and
-                anything else, including zero and false, as a value.
-              method: live-probe
-              verified: '2026-10-09'
             examples: ["record_created", "record_updated", "extract_not_empty", "fail_record_when_empty"]
     required:
       - dataType

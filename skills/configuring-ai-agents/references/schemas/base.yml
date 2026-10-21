@@ -16,14 +16,6 @@ ImportBase:
         one. An Event Streams publisher (`TopicImport`) must omit it: with a connection set the
         server validates the document as that connection's adaptor instead.
       examples: ["60a2c4e6f321d800129a1a3c"]
-      x-celigo-canon:
-        decision: not-required
-        reason: >-
-          Connection-less flavors exist — the server creates ToolImport, AiAgentImport,
-          GuardrailImport, and TopicImport without a connection. Required only for the other
-          adaptor types, encoded conditionally on the request schema.
-        method: live-probe
-        verified: '2026-09-21'
     _integrationId:
       type: [string, 'null']
       format: objectId
@@ -101,15 +93,6 @@ ImportBase:
         TopicImport: Publishes each record as a message to an Event Streams topic, configured through `topic`; needs no connection.
         RESTImport: Legacy REST adaptor, superseded by HTTPImport — still accepted and present on older imports.
       examples: ["HTTPImport", "NetSuiteDistributedImport", "NetSuiteHTTPImport", "SalesforceImport", "FTPImport", "AiAgentImport", "GuardrailImport", "TopicImport"]
-      x-celigo-canon:
-        decision: not-required
-        reason: >-
-          Server infers adaptorType from the supplied config subdoc on create (probed: omit
-          with an http config → HTTPImport inferred; omit with an http config plus nsDomainType
-          → NetSuiteHTTPImport inferred; omit with a topic subdoc → TopicImport inferred).
-          Legacy docs also lack it.
-        method: live-probe
-        verified: '2026-09-21'
     nsDomainType:
       type: string
       enum:
@@ -186,13 +169,6 @@ ImportBase:
         Descriptive, unique names indicating the destination system and purpose make large
         accounts easier to manage.
       examples: ["Shopify Customer Import", "NetSuite Sales Order Import"]
-      x-celigo-canon:
-        decision: stricter-than-server
-        reason: >-
-          Server requires a non-empty name on create and caps its length, but accepts an
-          empty name on update; the spec requires a non-empty name on every write.
-        method: live-probe
-        verified: '2026-07-05'
     description:
       type: [string, 'null']
       description: |-
@@ -385,6 +361,14 @@ ImportBase:
           ("Field "blobKeyPath" is not supported for this import type."); route file content
           through a blob-capable import (HTTP, FTP, S3) instead.
         - |-
+          Optional on a `blob: true` file-provider import: when omitted the platform reads the
+          record's root `blobKey` — the field a blob export emits on its `{blobKey, fileMeta}`
+          record — so a file-transfer flow needs no `blobKeyPath`. Observed on an FTP import
+          (recorded runs writing files with no `blobKeyPath`) and on a Google Drive folder
+          upload (`http.type: file`, the marketplace file-transfer template's shape); other
+          file providers were not probed. Set it only when a response mapping placed the key
+          elsewhere; on those two providers its absence is not a cause of upload failures.
+        - |-
           The value at this path must be a blobKey produced by an upstream blob
           export or blob lookup and carried onto the record via that step's
           response mapping (idiom: extract ``data.0.blobKey`` → generate
@@ -411,7 +395,8 @@ ImportBase:
         - ToolImport
       description: |-
         When true, this import transfers raw file content (blobs) to the destination rather than
-        structured records, reading each file through `blobKeyPath`. Not accepted on
+        structured records, reading each file through `blobKeyPath` (optional on FTP and Google
+        Drive file-provider imports, which fall back to the record's root `blobKey`). Not accepted on
         `AiAgentImport`, `GuardrailImport`, or `ToolImport` — those adaptors process records only
         and reject the flag with 422 `not_supported`.
       x-celigo-ai-guidance:
@@ -447,26 +432,20 @@ ImportBase:
         - filter
       description: |-
         Filter applied to incoming records before they are sent to the destination system.
-        Records that match continue through the import; records that don't are silently
-        dropped. Filter expressions reference the incoming record's fields.
+        Records that match continue through the import; records that don't skip this import,
+        counted as ignored, and continue to the next step. Filter expressions reference the
+        incoming record's fields.
       allOf:
         - $ref: '../common-schemas/filter.yml#/Filter'
       x-celigo-ai-guidance:
         - |-
           ## IMPORT-SPECIFIC BEHAVIOR
 
-          **Pre-Import Filtering**: Filters are applied to incoming records before they are sent to the destination system. Records that don't match the filter criteria are silently dropped and not imported.
+          **Pre-Import Filtering**: Filters are applied to incoming records before they are sent to the destination system. A record that doesn't match is not sent, but it is not removed from the flow: it continues to the next step without this import's response-mapped fields, so a later step that writes those fields needs its own filter.
     traceKeyTemplate:
       type: string
       x-celigo-agent:
         - handlebars
-      x-celigo-canon:
-        decision: no-max-length
-        reason: >-
-          The length cap applies to the derived trace key, not this template string; the
-          platform truncates over-long keys from the middle at run time.
-        method: documented-contract
-        verified: '2026-08-28'
       description: |-
         Handlebars template that overrides how each record's unique trace key is generated,
         used to track records through the flow and match errors to records. Trace keys are
@@ -561,13 +540,9 @@ ImportBase:
         - |-
           JavaScript hook references attached to lifecycle stages of the import.
           Engage hooks ONLY when the user explicitly wants scripting OR a requirement
-          cannot be expressed through declarative specialists (mapping / filter /
+          cannot be expressed through declarative configuration (mappings / filters /
           responseTransform).
           Hooks bypass the platform's declarative validation, so use them sparingly.
-        - |-
-          Phase A authoring scope: ``preMap`` and ``postMap`` only.
-          ``postSubmit`` and ``postAggregate`` are Phase B's territory (they author
-          against the real destination response).
       properties:
         preMap:
           type: object
@@ -582,9 +557,9 @@ ImportBase:
               mapping step, on the raw upstream records.  Engage when the
               user needs to reshape, validate, filter, or annotate records
               before the mapping sees them (drop archived records,
-              normalize date strings, split a record into many).  Don't
+              normalize date strings).  Don't
               engage for static value substitution or simple field
-              renames — that's the mapping specialist's job.
+              renames — mappings handle those.
 
               Runtime contract: ``options.data[]`` (the page of upstream
               records) → array of the same length.
@@ -626,11 +601,6 @@ ImportBase:
               Post-submit JavaScript hook — runs AFTER each batch of
               destination writes, on the destination's response.
 
-              **Phase B owns this slot.**  Phase A must NOT emit a
-              ``$agent`` marker here (see "Phase A vs Phase B ownership"
-              in the engine prompt).  Phase B authors this against the
-              real probe response.
-
               Runtime contract: ``options.responseData[]`` (one per
               submitted record; ``{statusCode, errors, _json, ...}`` —
               ``id`` is present on real runs but absent from the
@@ -655,11 +625,6 @@ ImportBase:
               ``invalid_hook`` ("unsupported postAggregate hook") —
               never emit it for non-file adaptors.
 
-              **Phase B owns this slot.**  Phase A must NOT emit a
-              ``$agent`` marker here (see "Phase A vs Phase B ownership"
-              in the engine prompt).  Phase B authors this against the
-              real probe response.
-
               Runtime contract: ``options.postAggregateData``
               (``{success, _json, code, message, source}``) → no return
               value; side effects only (logging, notifying, downstream
@@ -669,8 +634,9 @@ ImportBase:
     sampleResponseData:
       type: [object, array, string]
       description: |-
-        Sample response payload used to preview response mappings and test downstream steps
-        without calling the destination system.
+        Sample destination response kept with the import for authoring its response mapping.
+        Flow test runs and previews don't read it; they substitute `mockResponse`, or a
+        placeholder when none is saved.
     responseTransform:
       x-celigo-agent:
         - transform
@@ -708,8 +674,7 @@ ImportBase:
 
           REQUIRED for ``SalesforceImport`` and ``WrapperImport``: these
           adaptors must use Mapper 1.0; Mapper 2.0 is not supported for
-          them.  The agent's adaptor→mode classifier routes them here
-          automatically.  ``NetSuiteDistributedImport`` is also V1-required
+          them.  ``NetSuiteDistributedImport`` is also V1-required
           but uses a NetSuite-specific variant at its adaptor-scoped copy
           ``netsuite_da.mapping`` (richer sublist / subRecord vocabulary) —
           not this field.
@@ -718,17 +683,9 @@ ImportBase:
           ``FTPImport``, ``JDBCImport``, etc.) when the user explicitly asks
           for Mapper 1.0 — e.g. when the import wraps a legacy v1 connector
           or is being migrated from an older integration.  Those adaptors
-          default to Mapper 2.0 at the top-level ``mappings`` (plural) field;
-          see :mod:`celigo_agents.helpers.mappings.mapping_mode` for the
-          adaptor → default-mode classifier.  Do not emit a marker here
-          unsolicited; the v2 default produces better output for modern
-          connectors.
-        - |-
-          ## Specialist marker
-
-          Managed by the MappingsAgent (``$agent: mapping``) — resource-
-          authoring agents must emit a specialist marker at this field
-          rather than generating mapping content inline.
+          default to Mapper 2.0 at the top-level ``mappings`` (plural) field.
+          Do not set this field unsolicited; the v2 default produces better
+          output for modern connectors.
         - |-
           Allowed (but not the default) on other import adaptors such as
           ``HTTPImport``, ``RDBMSImport``, ``FTPImport``, and
@@ -745,8 +702,8 @@ ImportBase:
 
           Lookups referenced by ``lookupName`` live on the top-level
           ``resource.lookups`` array (mirrored under the adaptor key for
-          adaptors that maintain their own copy — see the mirror pattern in
-          the MappingsAgent architecture). Lookups are independent of this
+          adaptors that maintain their own copy — see the mirror invariant
+          on ``lookups``). Lookups are independent of this
           mapping: they are neither created nor cleared automatically when
           this mapping changes.
       properties:
@@ -807,7 +764,9 @@ ImportBase:
       description: |-
         Field mappings that transform incoming records into the destination system's field
         structure — renaming fields, converting types, building nested objects, and applying
-        formulas or lookups to derive values.
+        formulas or lookups to derive values. The mapped output builds only the request this
+        import sends: the next step receives the record as it arrived here, plus whatever this
+        step's response mapping merges back.
       x-celigo-ai-guidance:
         - |-
           ## Extract evaluation root
@@ -861,9 +820,8 @@ ImportBase:
         - |-
           ## Mirror invariant
 
-          Both arrays MUST hold byte-for-byte identical content. The
-          MappingsAgent writes both on every save and treats them as a
-          single logical field.
+          Both arrays MUST hold byte-for-byte identical content: write
+          both on every save and treat them as a single logical field.
         - |-
           ## Shape
 
@@ -875,7 +833,7 @@ ImportBase:
             resultField, ...)
           - ``netsuite_da.lookups`` — NetSuite search (recordType,
             searchField, operator, ...)
-          - ``http.lookups`` — HTTP request (method, relativeURI, postBody,
+          - ``http.lookups`` — HTTP request (method, relativeURI, body,
             extract, ...)
           - ``jdbc.lookups`` / ``rdbms.lookups`` — SQL query (query,
             extract, ...)
@@ -922,7 +880,7 @@ ImportBase:
           - ``envelope``: the mapper sees a wrapped object of the shape
             ``{record: {...}, settings: ..., job: ...}`` — the same
             runtime-context envelope Handlebars / SQL / GraphQL
-            specialists consume. ``mappings[].extract`` JSONPath values
+            templates render against. ``mappings[].extract`` JSONPath values
             MUST include the ``record.`` segment — for example
             ``"$.record.orderId"`` or ``"$.record.customer.email"``.
             PLACEHOLDER extracts use ``"$.record.PLACEHOLDER_<field>"``.
@@ -947,9 +905,9 @@ ImportBase:
           platform, but emitting ``inputContext: record`` makes the
           contract self-documenting and prevents the mapper from drifting
           into envelope mode if an upstream change ever changes the
-          platform default. The MappingsAgent reads this value off the
-          resource and threads it into the mapping generator's prompt so
-          the JSONPath form matches the runtime root.
+          platform default. Read this value before writing
+          ``mappings[].extract`` so the JSONPath form matches the runtime
+          root.
     rest:
       type: object
       deprecated: true

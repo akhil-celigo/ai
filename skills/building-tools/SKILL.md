@@ -25,7 +25,7 @@ A tool is Celigo's **first-class reusable building block**. It encapsulates logi
 - The logic is **specific to one flow or API and won't be reused** -- inline it as a lookup/import processor directly
 - You need **abstract/instance templating** for multi-tenant patterns -- use abstract flows
 
-**Tool vs API:** the split is how the work gets invoked. An **API** is reachable from *outside* Celigo over HTTP (a partner system, a customer-facing app). A **tool** is reachable only from *inside* Celigo (flow steps, AI agents, APIs, other tools). If a recipe must be reachable from both, build it as a tool and expose the tool behind an API endpoint -- the tool stays available to inside-Celigo consumers at the same time.
+**Tool vs API:** the split is the contract callers get. A **tool** is called by flow steps, AI agents, APIs and other tools, and outside callers can reach it too: a caller authenticated to the Celigo REST API can run it directly through its invoke operation (input plus connection bindings; the output comes back synchronously), and an MCP server publishes tools to outside AI clients. Put an **API** in front only when callers need their own URL, method and status codes (a partner system, a customer-facing app) -- the tool stays available to its other consumers at the same time.
 
 **Tool vs flow:** tools don't start themselves -- no `schedule`, no listeners, no flow runtime controls (`proceedOnFailure` and friends are the consumer's concern), and no abstract/instance layer (a tool is already the unit of reuse; per-environment variation is handled by the consumer-bound connection model). "Every night, do X" or "when a webhook arrives, do Y" is a flow -- the tool may be the thing the flow *does*.
 
@@ -88,6 +88,8 @@ A tool never pins connections at design time -- the key difference from flows an
 - **A tool's lookups and imports declare the connections they need**, and the consumer supplies the actual connection at bind time -- when the tool is added as a flow step, attached to an AI agent, exposed behind an API endpoint, or embedded in another tool.
 
 The tool definition stays unchanged across every binding. The same tool can be bound with a sandbox NetSuite connection from one consumer and a production NetSuite connection from another, without forking. Mechanically, the tool's page processors reference underlying export and import resources that carry the connection; binding selects which connection records those resources use in that context. Because of this, knowing which connections a tool requires is part of its design -- those connections must already exist in the consumer's account before the tool can be bound and run there.
+
+Binding isn't optional. A direct invoke and a tool step (a `ToolImport`) must list every connection the tool's steps use as `{"_abstractId": <authored id>, "_id": <connection to run with>}` -- in the invoke body's `overrides.connections`, or in the import's `tool.overrides.connections`. The same id twice keeps the authored connection, and leaving one out fails with `connection_not_overridden` ("Missing connection overrides"). `celigo tools connections <id>` lists the connections to bind. An MCP server binds per step instead; see [building-mcp-servers > How to Build an MCP Server](../building-mcp-servers/SKILL.md#how-to-build-an-mcp-server).
 
 ## Quick Reference
 
@@ -204,7 +206,7 @@ Each branch contains `pageProcessors[]` -- an ordered list of exports (lookups) 
 
 Output mappings transform the processed data into the tool's return value. Supports:
 
-- `mappings[]` -- extract/generate field pairs (Celigo standard mapping format)
+- `mappings[]` -- Mapper 2.0 rows, such as `{"generate": "orderStatus", "extract": "$.statusCode", "dataType": "string", "status": "Active"}`. A bare `extract` writes that text literally, and a nested target is a parent row with child `mappings`, not `a.b` in `generate` ([writing-mappings > Mapper 2.0 Workflow](../writing-mappings/SKILL.md#mapper-20-workflow))
 - `lookups[]` -- static key-value enrichment tables
 - `hooks.preMap` / `hooks.postMap` -- script hooks before and after mapping
 
@@ -213,6 +215,12 @@ Output mappings and branch response mappings both shape data, but at different t
 ### 9. Build the JSON
 
 Reference the [Schema Index](#schema-index) for the exact fields needed. Use the [Which Schemas to Read](#which-schemas-to-read) decision rule to determine which files to consult.
+
+### 10. Test the tool
+
+Pass the test input explicitly as `{"input": {...}}`, in a file passed to `celigo tools test-run <id> --file <path>`. A test run ignores the saved `mockInput` and otherwise starts from an empty record.
+
+Lookups in a test run call their live systems, and imports never send (each returns its saved `mockResponse` or a placeholder), so a passing run proves the lookups and data shaping but not the writes. A test run never appears in the tool's request history. Invoking the tool runs it for real, imports included: `celigo tools invoke <id> --file <path>` with `{"input": {...}, "overrides": {"connections": [...]}}` (see [Consumer-Bound Connections](#consumer-bound-connections)).
 
 ## Refactoring Steps into a Tool
 
@@ -247,10 +255,13 @@ celigo tools delete <id>
 celigo tools add-processor <id> <exportOrImportId> [--router <routerId>] [--branch <branchName>] [-y]
 celigo tools remove-processor <id> <exportOrImportId> [--router <routerId>] [--branch <branchName>] [-y]
 
-# Test run
-celigo tools test-run <id>
+# Test run (the --file body is {"input": {...}})
+celigo tools test-run <id> --file <path>
 celigo tools test-run-step-results <id> <runId> <exportOrImportId>
 celigo tools test-run-step-logs <id> <runId> <exportOrImportId>
+
+# Invoke (runs for real; the --file body is {"input": {...}, "overrides": {"connections": [...]}})
+celigo tools invoke <id> --file <path>
 
 # Debug (requires debug enabled on the underlying export/import)
 celigo tools debug-requests <id> <exportOrImportId> [--since <minutes>]
@@ -287,7 +298,7 @@ celigo templates marketplace
 1. **PUT erases omitted fields.** Always GET first, modify, then PUT. The `set` command handles this.
 2. **Router IDs must be unique within the tool.** Branch `nextRouterId` must reference a real router `id` or the special `"outputRouter"` terminal value.
 3. **No dangling branches.** All branches must merge back to the output node. A dangling branch causes a configuration error at execution time, even if no record takes that path.
-4. **Do not include `routeRecordsTo` or `routeRecordsUsing` on routers unless needed.** If either is present, the API may also require a top-level `dataType` field, triggering validation errors. Omit both for simple tools -- the API defaults correctly.
+4. **Routing fields come as a pair.** Set `routeRecordsTo` and `routeRecordsUsing` together on any router that chooses between branches, and leave both off a one-branch pass-through router. Half a pair fails with 422 `invalid_flow_router_config`; several branches with neither field fail with `invalid_flow_router_branch`.
 5. **Tools cannot be deleted while in use.** Check "Used by" dependencies first (flows, APIs, agents, MCP servers referencing the tool).
 6. **`add-processor` auto-creates a router.** If the tool has no routers, the command creates a default router with one branch. Otherwise it targets the first router's first branch by default -- use `--router` and `--branch` to target a specific location.
 7. **Tool names must be unique in the MCP Server.** The `name` field in `tools[]` on the MCP Server must be unique across all tool AND api entries in that server.
@@ -306,4 +317,7 @@ celigo templates marketplace
 | 422 `dangling branch` | Branch missing exit | Set `nextRouterId` to a valid router ID or `"outputRouter"` on every branch |
 | 422 `_exportId not found` / `_importId not found` | Deleted or invalid resource | Verify the referenced export/import exists and has not been deleted |
 | 409 `tool in use` | Tool referenced by consumers | Remove tool from all flows, APIs, agents, and MCP servers before deleting |
-| 422 `dataType required` | Unnecessary routing fields | Remove `routeRecordsTo` / `routeRecordsUsing` from simple tools; the API defaults correctly |
+| 422 `invalid_flow_router_config` | A router sets only one of `routeRecordsTo` / `routeRecordsUsing` | Set both on a router that chooses between branches, or neither on a one-branch pass-through router |
+| 422 `invalid_flow_router_branch` | A router with several branches sets neither routing field | Set `routeRecordsTo` and `routeRecordsUsing` on it |
+| `connection_not_overridden` ("Missing connection overrides") | An invoke or tool step left a connection the tool's steps use unbound | Bind every connection, as in [Consumer-Bound Connections](#consumer-bound-connections) |
+| `status_field_absent` on save | An output `mappings[]` row has no `status` | Add `"status": "Active"` to every row |

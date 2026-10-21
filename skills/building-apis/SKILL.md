@@ -23,7 +23,7 @@ Used across integrations alongside flows and tools. APIs do not have their own a
 
 APIs are invoked by an external HTTP caller -- there is no upstream export, no scheduler, no listener feeding them. That has three design consequences:
 
-- **The request stage is the input shape.** Whatever the caller sends (body, path params, query params, headers) is what downstream processing sees as the record. There is no upstream pipeline to reshape it first -- use the request `transform` if the envelope needs reshaping before routing.
+- **The request body is the input shape.** What the caller sends in the body is what downstream processing sees as the record. Don't assume path params, query params or headers are on `record`: in a test run they reach neither the record nor the request `transform`, so check a real call before building logic on them. There is no upstream pipeline to reshape the body first -- use the request `transform` if it needs reshaping before routing.
 - **The response stage is the output.** Whatever the selected response definition produces is exactly what the caller receives. Nothing runs after it.
 - **No self-starting.** APIs have no `schedule`, no listener, and none of the flow runtime controls (`proceedOnFailure`, `skipRetries`, chaining). "Every night at 2 AM, do X" is a flow -- possibly one that *calls* the API, but the schedule lives on the flow. Retry-after-failure is the caller's decision.
 
@@ -68,7 +68,7 @@ When an API receives a request:
 
 A single `handleRequest` JavaScript function receives the request object (method, headers, queryParams, body, pathParams) and returns `{statusCode, headers, body}`. Complete control with no visual configuration.
 
-**Legacy APIs** (no `type` field, top-level `_scriptId` + `function`) exist in production but are not represented in the current spec. Distinguish by: if `type` is absent/null and `_scriptId` is present, it's legacy.
+**Legacy APIs** (no `type` field, top-level `_scriptId` + `function`) can still turn up in an account but are not represented in the current spec. Distinguish by: if `type` is absent/null and `_scriptId` is present, it's legacy.
 
 ## Quick Reference
 
@@ -171,7 +171,7 @@ Choose the HTTP method and URI path. GET and POST are most common; PUT and PATCH
 
 - Path parameters use colon notation: `/customers/:id`
 - Document query parameters, path parameters, headers, and body schema
-- Add a `mockRequest` for testing the pipeline without live calls
+- Save a `mockRequest` as a sample request, but send the test request explicitly when you test (step 10)
 - Optionally add a request `transform` (expression-based or script-based) to reshape incoming data before processing
 
 ### 6. Build the processing pipeline
@@ -209,6 +209,12 @@ Set `id: "apiRouter"` and choose routing method:
 Reference the [Schema Index](#schema-index) above for exact field schemas.
 
 Every API needs at minimum: `name`, `type`, and either `builder` (with `request`) or `script` (with `_scriptId` and `function`).
+
+### 10. Test the API
+
+Send the test request explicitly as `{"mockRequest": {"body": {...}}}`, in a file passed to `celigo apis test-run <id> --file <path>`. A run without one starts from an empty record; the saved `mockRequest` isn't replayed. The body must be a JSON object: an array is refused with 400 "Mock request body should be a plain object." Only the body reaches the first step. Path params, query params and headers in a test request appear nowhere in that step's context, and a request `transform` can't read them either, so check logic that depends on them with a real call.
+
+Lookups in a test run call their live systems, and imports never send: each returns its saved `mockResponse` or a placeholder ([configuring-imports > Testing an Import Without Writing](../configuring-imports/SKILL.md#testing-an-import-without-writing)). So a passing run proves the request shaping, routing and lookups but not the writes, and it never shows up in request history. Only a real call to the endpoint does.
 
 ## The Response and Routing Model
 
@@ -268,15 +274,28 @@ A `custom` response can carry any `statusCode` (the "not found" response returns
 ```
 {
   "mappings": [
-    {"extract": "customerId", "generate": "data.id", "dataType": "string"},
-    {"extract": "status", "generate": "data.status", "dataType": "string"}
+    {
+      "generate": "data",
+      "dataType": "object",
+      "status": "Active",
+      "mappings": [
+        {"extract": "$.customerId", "generate": "id", "dataType": "string", "status": "Active"},
+        {"extract": "$.status", "generate": "status", "dataType": "string", "status": "Active"}
+      ]
+    }
   ]
 }
 ```
 
-Every response mapping entry needs `dataType` -- a save without it fails with 422 `Path 'dataType' is required`, once per entry that omits it.
+Response mappings are Mapper 2.0 rows. Every row needs `dataType` and `status` -- a save without `dataType` fails with 422 `Path 'dataType' is required`, once per row that omits it, and a row without `status` fails with 422 `Mapping object must have status field present.` An `extract` reads a field only as a `$.` path or Handlebars: a bare string, `record.customerId` included, is written into the body as that literal text. A dotted `generate` such as `data.id` makes one key with a dot in its name, so build nested objects as an `object` row with child `mappings`, as above.
 
 The two work together: the lookup's `responseMapping` merges `customerId` onto the record, then the response's `mappings` place `customerId` into the body's `data.id`. A field the page processor returned must first be carried onto the record by a `responseMapping` before a response `mapping` can extract it. When unsure which layer you need, ask: does this step *add* the field to the record (page-processor `responseMapping`) or *read* the field off the record into the body (response `mappings`)?
+
+## Observing Calls
+
+Look for an API's calls in its request history, the run index (`celigo apis request-history <id>`; builder-mode APIs only). It covers the last 5 minutes unless you pass a window (`--time-gte`, `--time-lte`), and a new call can take a while to appear. Then open that execution's trace with `celigo apis execution-logs <id> <executionId>`; step-level trace data is recorded only under `detailed` logging or a debug window. The older request-log store (`celigo apis logs`) may hold nothing for current calls, and test runs appear in neither, so an empty result from one store doesn't prove the API wasn't called.
+
+Change an API's logging only by patching `logging.mode` or `logging.debugUntil` (`celigo apis set <id> logging.mode=detailed`); a create or a full update ignores `logging` without an error. `noLogging` records no request history, and `standard`, `detailed` and a debug window need payload storage on the account (422 `payload_storage_required`). The modes are listed under `logging` in [base.yml](references/schemas/base.yml).
 
 ## CLI Commands
 
@@ -287,6 +306,7 @@ celigo apis get <id>
 celigo apis create < api.json
 celigo apis update <id> < api.json
 celigo apis set <id> key=value [key2=value2 ...]
+celigo apis dependencies <id>                 # check before deleting
 celigo apis delete <id>
 
 # Clone (builder-mode only)
@@ -296,12 +316,15 @@ celigo apis clone <id> --api-version <version> [--name <name>] [--description <d
 celigo apis add-processor <id> <exportOrImportId> [--router <routerId>] [--branch <branchName>]
 celigo apis remove-processor <id> <exportOrImportId> [--router <routerId>] [--branch <branchName>]
 
-# Logs
-celigo apis logs <id>
+# Request history and logging
+celigo apis request-history <id> [--time-gte <iso>] [--time-lte <iso>]
+celigo apis execution-logs <id> <executionId> [--details]
+celigo apis set <id> logging.mode=<basic|standard|detailed|accountLevel|noLogging>
+celigo apis logs <id>                         # older request-log store
 celigo apis log-detail <id> <key>
 
-# Test run
-celigo apis test-run <id>
+# Test run (the --file body is {"mockRequest": {...}})
+celigo apis test-run <id> --file <path>
 celigo apis test-run-step-results <id> <runId> <exportOrImportId>
 celigo apis test-run-step-logs <id> <runId> <exportOrImportId>
 
@@ -323,8 +346,9 @@ Before creating or updating an API, verify:
 - [ ] `name` is set and descriptive
 - [ ] `type` is `"builder"` or `"script"` (not omitted, which creates a legacy API)
 - [ ] Builder mode: `builder.request.method` and `builder.request.relativeURI` are set
+- [ ] Builder mode, full update: the body carries `disabled` (`false` keeps the API online)
 - [ ] Builder mode: lookups and imports sit in a router branch (an API with no processing can omit `routers`)
-- [ ] Every response `mappings[]` entry has a `dataType`
+- [ ] Every response `mappings[]` row has a `dataType` and `status: "Active"`, reads fields with `$.` paths or Handlebars, and nests objects with child `mappings` rather than a dotted `generate`
 - [ ] Builder mode: last branch has `nextRouterId: "apiRouter"`
 - [ ] Builder mode: both `success` and `fail` responses are defined
 - [ ] Builder mode: success response `inputFilter` uses `["equals", ["boolean", ["context", "success"]], true]`
@@ -344,16 +368,20 @@ Before creating or updating an API, verify:
 6. `**version` becomes part of the URL path.** The full endpoint is `/{version}{relativeURI}`. Changing the version changes the URL that callers must use.
 7. **Page-processor `responseMapping` and response `mappings` are different layers.** `responseMapping` enriches the record with fields from a page processor's response; a response's `mappings` shape the HTTP body from that record. A field the lookup returned won't reach the body unless a `responseMapping` first carries it onto the record.
 8. **APIs don't start themselves.** No `schedule`, no listeners, no flow-level runtime controls, no abstract/instance templating. Scheduled or event-driven work belongs in a flow that calls the API.
-9. **`disabled: true` returns 404 to callers.** Use it to pause an API without deleting it; re-enable with `disabled: false`.
+9. **A full update without `disabled` takes the API offline.** `disabled: true` pauses an API without deleting it (callers get a 404). Send `disabled` on every full update of a builder API (`false` to keep it online): a body that omits it saves without error, but the endpoint answers 404 `api_not_found` until `disabled: false` is sent again.
+10. **Deleting an API doesn't check dependents.** The delete succeeds and the endpoint stops at once, so anything that depends on the API, such as an MCP server publishing it, breaks. Check `celigo apis dependencies <id>` first; a deleted API stays in the recycle bin for 30 days (`celigo recycle-bin restore <id>`).
 
 ## Common Errors
 
 | Error | Cause | Fix |
 |-------|-------|-----|
 | `404` on API endpoint | Wrong `version` or `relativeURI` in the request | Verify the full URL is `/{version}{relativeURI}` and both match the API definition |
+| `404` `api_not_found` on an endpoint that answered before | The API is disabled, or a full update left `disabled` out | Send `disabled: false` (`celigo apis set <id> disabled=false`) |
 | `422` validation error on create/update | Missing required fields or invalid field values | Check the [Pre-Submit Checklist](#pre-submit-checklist); verify `type` is set |
 | Response always returns the `fail` response | Success `inputFilter` is malformed or missing type wrapper | Use `["equals", ["boolean", ["context", "success"]], true]` exactly |
 | Response body is empty | Response `mappings` not configured or field paths don't match | Verify mapping extract paths match the actual processed record structure |
+| `422` `Mapping object must have status field present.` | A response mapping row without `status` | Add `"status": "Active"` to every row |
+| Response body holds a field's name (`"customerId"`) instead of its value, or a key with a dot in it | A bare `extract` is a literal, and a dotted `generate` is one key | Read the field with a `$.` path (`$.customerId`), and nest objects with child `mappings` |
 | Pipeline step silently skipped | `inputFilter` on a branch evaluates to false for all records | Debug with `celigo apis test-run-step-results` to see each step's input/output |
 | `Clone failed` error | Attempting to clone a script-mode or legacy API | Clone is builder-mode only; recreate script APIs manually |
 | Page processor returns no data | Export/import `_id` reference is wrong or resource is disabled | Verify the referenced resource exists and is enabled with `celigo exports get` / `celigo imports get` |

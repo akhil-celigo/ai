@@ -12,7 +12,14 @@
  *    but credential-shaped examples synced from upstream — a quoted hex "Secret Access
  *    Key", a real-format Google client ID, a jwt.io JWT, PEM key headers, and OAuth form
  *    bodies and labels that put a literal value after a token or secret key name.
- * This lint fails the sync before either kind of schema ships.
+ *  - Oct 2026: the skills shipped what upstream's public bundles strip — pre-GA properties
+ *    flagged `x-internal` and `x-celigo-canon` validation-decision records. The sync strips
+ *    both now; this lint keeps either from shipping again, whatever the source.
+ *  - Oct 2026: the synced import and transform schemas carried guidance upstream had written for
+ *    Celigo's own authoring tooling — component class names, generator markers, a Python module
+ *    path — along with issue-tracker keys. The sync now strips every Celigo vendor key the skills
+ *    don't ship; this lint keeps the rest, and any leftover key, from shipping again.
+ * This lint fails the sync before any such schema ships.
  *
  * Signatures detected (text-level, dependency-free):
  *  1. A schema property literally named `type` declared as an array — Mongoose's
@@ -23,6 +30,14 @@
  *     placeholder names, `{{{iClient.…}}}` references, a JWT header followed by
  *     `.EXAMPLEpayload.EXAMPLEsignature`, and EXAMPLE-marked vendor secrets (except AWS
  *     key IDs, which match however they are marked).
+ *  4. Any mention of `x-internal`, `x-celigo-canon`, or another `x-celigo-*` key that isn't in
+ *     PUBLIC_VENDOR_KEYS, `\u`/`\x` escapes decoded first.
+ *  5. Text written for Celigo's own authoring tooling: a name with an `Agent` part that isn't in
+ *     PUBLIC_AGENT_NAMES, a `$agent` generator marker, or a Python module reference (a Sphinx role
+ *     such as `:mod:`, a `.py` file, or a snake_case package path through a conventional package
+ *     directory such as `helpers` or `utils`).
+ *  6. An issue-tracker key (`ABC-12345`, five or six digits) that isn't quoted. Quoted example
+ *     ids such as `"ORD-100245"` pass, and so do ISO standard numbers.
  *
  * Usage: node scripts/lint-schemas.mjs [files...]   (default: every yml under skills/)
  * Exits non-zero when any signature matches.
@@ -30,6 +45,32 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+
+/** The Celigo vendor keys the skills ship. The sync strips every other `x-celigo-*` key. */
+export const PUBLIC_VENDOR_KEYS = [
+	"x-celigo-agent",
+	"x-celigo-ai-guidance",
+	"x-celigo-deprecated-enum-values",
+	"x-celigo-excludeAdaptorTypes",
+	"x-celigo-handlebars-context",
+	"x-celigo-refModel",
+	"x-celigo-ui-override",
+];
+
+/** Public names with an `Agent` part: the AI agent resource's, and the User-Agent header. */
+export const PUBLIC_AGENT_NAMES = [
+	"aiAgent",
+	"AiAgent",
+	"AiAgentConfig",
+	"AiAgentImport",
+	"GuardrailAiAgentConfig",
+	"UserAgent",
+	"userAgent",
+];
+
+export const isStrippedVendorKey = (key) => key.startsWith("x-celigo-") && !PUBLIC_VENDOR_KEYS.includes(key);
+
+const vendorSuffixes = [...PUBLIC_VENDOR_KEYS, "x-celigo-canon"].map((key) => key.slice("x-celigo-".length));
 
 const SIGNATURES = [
 	{
@@ -89,10 +130,45 @@ const SIGNATURES = [
 		name: "credential-shaped example: opaque literal assigned to a credential key",
 		regex: /"\w*(?:password|passwd|secret|token|api_?key)"\s*:\s*"(?![^"]*EXAMPLE)(?=[^"]*\d)(?=[^"]*[a-z])[a-z0-9+/=]{12,}"/i,
 	},
+	{
+		name: "mentions x-internal — the public bundles strip nodes flagged with it",
+		regex: /x-internal/,
+		escapesDecoded: true,
+	},
+	{
+		name: "mentions x-celigo-canon — the public bundles strip these validation-decision records",
+		regex: /x-celigo-canon/,
+		escapesDecoded: true,
+	},
+	{
+		name: "mentions an x-celigo-* key the skills don't ship — the sync strips all but PUBLIC_VENDOR_KEYS",
+		regex: new RegExp(`x-celigo-(?!(?:${vendorSuffixes.join("|")})(?![\\w-]))[\\w-]+`),
+		escapesDecoded: true,
+	},
+	{
+		name: "internal tooling text: a name with an Agent part that isn't in PUBLIC_AGENT_NAMES",
+		regex: new RegExp(`\\b(?!(?:${PUBLIC_AGENT_NAMES.join("|")})\\b)[A-Za-z_]\\w*Agent\\w*\\b`),
+	},
+	{
+		name: "internal tooling text: a $agent generator marker",
+		regex: /\$agent\b/,
+	},
+	{
+		name: "internal tooling text: a Python module reference",
+		regex: /:(?:mod|class|func|meth|attr|obj|data|exc):`|\b\w+\.py\b|\b[a-z][a-z0-9]*_[a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*\.(?:helpers|utils|services|handlers|models|prompts|pages)\.[a-z][a-z0-9_]*\b/,
+	},
+	{
+		name: "issue-tracker key outside quotes",
+		regex: /(?<!["'\w])(?!ISO-)[A-Z]{2,10}-\d{5,6}(?![\w"'-])/,
+	},
 ];
 
+const decodeEscapes = (text) =>
+	text.replace(/\\(?:u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2}))/g, (_, u, x) => String.fromCharCode(Number.parseInt(u ?? x, 16)));
+
 export function lintText(text) {
-	return SIGNATURES.filter((s) => s.regex.test(text)).map((s) => s.name);
+	const decoded = decodeEscapes(text);
+	return SIGNATURES.filter((s) => s.regex.test(s.escapesDecoded ? decoded : text)).map((s) => s.name);
 }
 
 function* walk(dir) {
@@ -130,10 +206,13 @@ function main() {
 	}
 	if (failed) {
 		console.error(
-			"\nSchema leak signature(s) found. Mongoose shapes corrupt data if agents copy them, and",
+			"\nSchema leak signature(s) found. Mongoose shapes corrupt data if agents copy them,",
 		);
 		console.error(
-			"credential-shaped examples block the Claude plugin directory listing (SECRET_IN_SCRIPT) —",
+			"credential-shaped examples block the Claude plugin directory listing (SECRET_IN_SCRIPT), and",
+		);
+		console.error(
+			"internal tooling text and tracker keys must not ship in this public repo —",
 		);
 		console.error(
 			"fix the source spec in integrator-api-specs before syncing (see scripts/sync-schemas.mjs).",

@@ -66,7 +66,7 @@ Usage
 
 field: The text field or variable to modify (e.g., record.order.notes).
 
-replacement: The value that should replace every substring matching regex.
+replacement: The value that replaces the text the pattern matches, inserted as written: "\n" puts a backslash and an n in the text, not a line feed. Pass "g" as the fourth argument whenever every match must change: {{regexReplace record.sku "" "[ -]" "g"}}. Without it only the first match changes ("a-b-c" becomes "ab-c").
 
 regex: Regular-expression pattern that identifies the text to replace.
 
@@ -88,17 +88,17 @@ Normalizing SKU format (remove spaces and dashes)
 
 Stripping HTML tags and &nbsp; entities
 
-{{{regexReplace field.name "" "(&nbsp;|<([^>]+)>)" "ig"}}}
+{{{regexReplace record.description "" "(&nbsp;|<([^>]+)>)" "ig"}}}
 
-Converting CRLF line-endings to LF and returning raw output
+Converting CRLF line-endings to LF (delete the carriage returns) and returning raw output
 
-{{{regexReplace record.description "\n" "\r\n" "g"}}}
+{{{regexReplace record.description "" "\r" "g"}}}
 
 Triple braces give the cleaned text exactly as produced, without Celigo's automatic quoting or encoding.
 
 Tip
 
-Patterns are JavaScript-style regular expressions — escape special characters (`\.` for a literal dot, `\\` for a backslash, etc.).
+Patterns are JavaScript-style regular expressions — escape special characters (`\.` for a literal dot). To match a literal backslash, use the class `"[\\]"`.
 
 If the field might be empty or missing, combine this helper with a conditional or default to avoid null results.
 
@@ -159,11 +159,13 @@ Parameters: field, regex, index (regexMatch only), options (flags: `g`=global, `
 
 Strip phone formatting to digits only:
 
-{{regexMatch (regexReplace phone "" "[^\d]" "g") "\d{10}$" "g"}}
+{{regexMatch (regexReplace record.phone "" "[^\d]" "g") "\d{10}$"}}
+
+The third argument of `regexMatch` is the match index (`1` returns the second match), so a flag goes in the fourth, after it (`0 "i"`). A flag put in the third slot is read as the index: `"g"` there just returns the first match.
 
 Extract value between parentheses:
 
-{{split (split exampleField "(" 1) ")" 0}}
+{{split (split record.exampleField "(" 1) ")" 0}}
 
 Input: "(BR12345)-WIT-1" → BR12345.
 

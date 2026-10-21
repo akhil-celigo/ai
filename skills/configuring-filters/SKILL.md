@@ -7,7 +7,7 @@ description: Configure Celigo filter rules on exports, imports, and flow branche
 
 # Configuring Filters
 
-A filter is a **record gate** that decides which records continue through the pipeline and which are silently dropped. Filters are configured directly on exports, imports, and flow router branches -- not as standalone resources.
+A filter is a **record gate** that decides which records pass a point in the pipeline. What happens to the rest depends on where it sits: an export's filter silently drops them from the flow, while a lookup's or an import's filter only skips that step for them. Filters are configured directly on exports, imports, and flow router branches -- not as standalone resources.
 
 Concerns when configuring a filter:
 
@@ -29,7 +29,7 @@ Applied to incoming records before they trigger a lookup API call. Records that 
 
 ### Import filter (import `filter`)
 
-Applied to records before they are sent to the destination system. Records that do not match are dropped and never submitted to the destination. Useful for conditional writes (e.g., only import records with a non-empty email).
+Decides whether the import runs for a record. A record that doesn't match skips this import -- nothing is sent to the destination for it -- and continues to the next step with nothing from this import's response mapping, so a later step that should only see written records needs its own filter. Useful for conditional writes (e.g., only import records with a non-empty email). AI agent and guardrail steps are imports, and their `filter` works the same way.
 
 ### Branch input filter (router branch `inputFilter`)
 
@@ -79,7 +79,7 @@ Prefer expressions -- they are simpler, faster, and do not require a separate sc
 
 Field access: `["extract", "fieldName"]` for record fields, `["settings", "flow.settingName"]` for configuration values.
 
-Type coercions: `["number", ...]`, `["string", ...]`, `["boolean", ...]`, `["epochtime", ...]`.
+Type coercions: `["number", ...]`, `["string", ...]`, `["boolean", ...]`, `["epochtime", ...]`. Every `extract` must sit inside one: a bare `["extract", ...]` is refused with 422 "Field operation extract must be called by a Type Conversion Operation", both when the filter is saved and by the filter processor (`celigo processors invoke filter`). Wrap `settings` the same way.
 
 Transformations: `["lowercase", ...]`, `["uppercase", ...]`, `["floor", ...]`, `["ceiling", ...]`, `["abs", ...]`.
 
@@ -87,7 +87,7 @@ Transformations: `["lowercase", ...]`, `["uppercase", ...]`, `["floor", ...]`, `
 
 | Schema | Contents |
 |---|---|
-| [filter.yml](references/schemas/filter.yml) | Filter object -- type, expression (version, rules), script (_scriptId, function), all operators and examples |
+| [filter.yml](references/schemas/filter.yml) | Filter object -- type, expression (version, rules), script (_scriptId, function), operators and examples; its `isempty`/`isnotempty`, `anyof` and bare `extract`s are refused (gotcha 1) |
 
 ## Related Skills
 
@@ -120,7 +120,7 @@ Expression rules use prefix (S-expression) notation. Every rule is an array wher
 
 **Pattern: Single condition**
 ```
-[operator, [extract, fieldName], value]
+[operator, [string, [extract, fieldName]], value]
 ```
 
 **Pattern: Multiple conditions (all must match)**
@@ -133,7 +133,7 @@ Expression rules use prefix (S-expression) notation. Every rule is an array wher
 [or, [condition1], [condition2], ...]
 ```
 
-**Pattern: Field access with type coercion**
+**Pattern: Numeric comparison**
 ```
 [operator, [number, [extract, fieldName]], numericValue]
 ```
@@ -149,10 +149,10 @@ Use the CLI `set` command to add or update a filter on an existing export or imp
 
 ```bash
 # Set an expression filter on an export (output filter)
-celigo exports set <id> filter.type=expression filter.expression.version=1 filter.expression.rules='["notempty",["extract","email"]]'
+celigo exports set <id> filter.type=expression filter.expression.version=1 filter.expression.rules='["notempty",["string",["extract","email"]]]'
 
 # Set an expression filter on an import
-celigo imports set <id> filter.type=expression filter.expression.version=1 filter.expression.rules='["notequals",["extract","status"],"cancelled"]'
+celigo imports set <id> filter.type=expression filter.expression.version=1 filter.expression.rules='["notequals",["string",["extract","status"]],"cancelled"]'
 ```
 
 For complex expressions, use JSON input:
@@ -228,15 +228,15 @@ Before creating or updating a filter, verify:
 - [ ] **`expression.version` is `"1"`** -- the only supported version
 - [ ] **Operator names are lowercase** -- `"notempty"`, not `"isNotEmpty"` or `"NOTEMPTY"`
 - [ ] **`extract` references valid field names** -- field names must match the actual record structure; use dot notation for nested fields (e.g., `"customer.email"`)
-- [ ] **Type coercions are applied where needed** -- comparing a string field to a number requires `["number", ["extract", "field"]]`
+- [ ] **Every `extract` sits inside a type coercion** -- `["string", ["extract", "email"]]`, or `["number", ["extract", "field"]]` to compare it to a number; a bare `extract` is refused with 422
 - [ ] **Script filter returns strict boolean** -- `true` or `false`, not truthy/falsy values
 - [ ] **Input filter is on a lookup export** -- `inputFilter` only applies when `isLookup: true`
 
 ## Gotchas
 
-1. **Operators are `notempty`/`empty`, not `isnotempty`/`isempty`.** The spec documents both forms but the platform uses the shorter names. Using `isnotempty` or `isempty` will silently fail to match.
-2. **Filtered records are silently dropped, not errored.** There is no error log entry for filtered records. They appear as `numIgnore` in job stats, which makes debugging "missing records" problems harder. Check the filter first when records disappear without errors.
-3. **Import filter drops records before submission.** Records filtered out on an import never reach the destination -- they are not sent, not rejected. This differs from a server-side rejection which would appear in errors.
+1. **Operators are `notempty`/`empty`, not `isnotempty`/`isempty`.** The synced [filter.yml](references/schemas/filter.yml) lists only the `is` forms, and its examples use `anyof` and bare `extract`s, but the platform refuses all of them with 422, when the filter is saved and by the filter processor: `Invalid operation: isnotempty.` (or `isempty`, `anyof`) for the operators, and the type-coercion message for a bare `extract`. Write `["notempty", ["string", ["extract", "email"]]]`.
+2. **Filtered records are ignored, not errored.** There is no error log entry for filtered records. They appear as `numIgnore` in job stats. An export's filter drops them from the flow silently, which makes debugging "missing records" problems harder -- check the filter first when records disappear without errors.
+3. **An import filter skips the import, not the record.** A record the filter rejects is never sent, so it never shows in errors, but it continues to the next step with this import's response-mapped fields empty. A later step that writes those fields needs its own filter on them, such as `["notempty", ["string", ["extract", "createdOrderId"]]]`.
 4. **Input filter skips the step, not the record.** On a lookup export, a filtered record skips the lookup but continues through subsequent flow steps. It is not removed from the pipeline.
 5. **Branch filters use the same expression syntax but live on the flow.** Branch `inputFilter` is configured on `routers[].branches[]` in the flow, not on the export or import. Use `celigo flows set` or `celigo flows update` to modify them.
 6. **Expression and script filters cannot coexist.** Setting `filter.type` to `"script"` ignores any `expression` config, and vice versa. Switching types does not auto-clear the other config block.
@@ -249,7 +249,9 @@ Before creating or updating a filter, verify:
 | Error / Symptom | Cause | Fix |
 |---|---|---|
 | Records silently disappear, no errors | Filter is dropping them; check `numIgnore` in job stats | Review the filter expression; temporarily remove it to confirm |
-| Filter passes all records (no filtering) | Wrong field name in `extract`, or type mismatch (comparing string to number without coercion) | Verify field name matches record structure; add type coercion |
+| 422 "Field operation extract must be called by a Type Conversion Operation but was called by `<operator>`." | A bare `extract`, on save or in the filter processor | Wrap it in a type coercion: `["notempty", ["string", ["extract", "email"]]]` |
+| 422 `Invalid operation: isnotempty.` (or `isempty`, `anyof`) | An operator the platform doesn't have, on save or in the filter processor | Use `notempty` or `empty`; for "any of", combine `equals` rules with `or` |
+| Filter passes all records (no filtering) | Wrong field name in `extract`, or a type mismatch (a `string` coercion compared with a number) | Verify field name matches record structure; use the coercion the comparison needs (`number` for numbers) |
 | Filter blocks all records | Logic inverted (e.g., `equals` instead of `notequals`), or field is always empty/null | Test with a known record; check if the field exists in the data |
 | "Function not found" on script filter | `function` name in `filter.script.function` does not match an exported function in the script | Verify exact function name (case-sensitive) in the script resource |
 | Script filter returns inconsistent results | Function returns truthy/falsy instead of strict `true`/`false` | Return explicit `true` or `false` |

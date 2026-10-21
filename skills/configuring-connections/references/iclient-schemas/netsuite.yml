@@ -1,19 +1,20 @@
 NetSuite:
   type: object
   description: |
-    NetSuite-specific iClient config for Token-Based Authentication (TBA).
-    Used when connection has authType: "token-auto" (Celigo-managed tokens).
-    The iClient stores the integration record's consumer key/secret.
+    NetSuite-specific iClient config for Token-Based Authentication (TBA):
+    a NetSuite integration record's consumer key and secret.
+    A connection with authType "token-auto" needs no iClient: Celigo
+    supplies the OAuth client.
   properties:
     consumerKey:
       type: string
       description: |
         NetSuite consumer key from the integration record.
         Stored encrypted; API responses return "******".
-        Omit on update to keep existing value.
+        Re-send the mask on update to keep it; an omitted key is not kept.
     consumerSecret:
       type: string
       description: |
         NetSuite consumer secret from the integration record.
         Stored encrypted; API responses return "******".
-        Omit on update to keep existing value.
+        Re-send the mask on update to keep it; an omitted secret is not kept.

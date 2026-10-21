@@ -731,15 +731,6 @@ NetSuite:
                   NetSuite's lowercase search operator names. Which operators a column accepts
                   depends on its data type.
                 examples: ["is", "anyof", "equalto"]
-                x-celigo-canon:
-                  decision: stricter-than-server
-                  reason: >-
-                    The server's operator list also carries a not-greater-than-or-equal-to entry
-                    whose characters include invisible zero-width spaces, so the plainly typed
-                    name is rejected and the corrupted one cannot be typed; the spec lists only
-                    the usable names.
-                  method: live-probe
-                  verified: '2026-09-11'
                 x-celigo-ai-guidance:
                   - |-
                     The server validates the value against this list and rejects anything else
@@ -845,7 +836,7 @@ NetSuite:
                     `[application · stage=apiCall] search.createColumn:
                     Missing a required argument: name`.  The platform
                     validation runs before any column data is read, so
-                    the build fails fast.
+                    the export fails fast.
                   - |-
                     ## NAME MUST BE A SEARCH COLUMN, NOT A BODY FIELD
                     NetSuite distinguishes between body fields (the
@@ -853,9 +844,8 @@ NetSuite:
                     search columns (the fields exposed for filtering /
                     sorting in saved searches, like `shipaddress1`).
                     `columns[].name` MUST be a search column ID, not
-                    a body field ID.  See the SEARCH COLUMNS section of
-                    the metadata fetcher output for the valid search
-                    column names for the chosen `recordType`.
+                    a body field ID: take it from the chosen
+                    `recordType`'s SEARCH COLUMNS list.
                   - |-
                     ## EXAMPLES
                     - `"internalid"` -- the record's internal id
@@ -1043,7 +1033,7 @@ NetSuite:
               webstore: Triggered by SuiteCommerce web store transactions.
               userevent: Triggered by user event script executions.
               mapreduce: Triggered by Map/Reduce script operations.
-              restlet: Triggered by RESTlet API calls.
+              restlet: Triggered by RESTlet API calls, including the records a NetSuite Distributed import writes.
               webapplication: Triggered by web application interactions.
               restwebservices: Triggered by REST web services API calls.
         disabled:
@@ -1051,7 +1041,9 @@ NetSuite:
           description: |-
             When true, the listener's NetSuite deployment is inactive and record saves no longer
             trigger the export. Maintained by the platform as the flow is disabled and re-enabled;
-            re-enabling the flow re-registers the deployment.
+            re-enabling the flow re-registers the deployment. A listener is created disabled, and
+            a flow created already enabled leaves it that way until a flow update sets
+            `disabled: false`, which activates it within seconds.
           x-celigo-ai-guidance:
             - |-
               Pause a listener by disabling its flow, not by setting this field. A listener that has
@@ -1550,7 +1542,7 @@ NetSuite:
               If the folder internal ID is required to be dynamic based on the data you are integrating,
               you can specify the JSON path to the field in your data containing the folder
               internal ID values instead — with DOUBLE braces (e.g. {{record.folderId}}).
-              Production usage is dominantly a static numeric ID; dynamic substitution is rare.
+              Default to a static numeric ID; dynamic substitution is the exception.
             - |-
               ## FIELD BEHAVIOR:
               - Identifies the specific folder in NetSuite's file cabinet to export files from
@@ -1575,7 +1567,7 @@ NetSuite:
               - May be linked to folder creation or folder search operations to retrieve valid IDs.
             - |-
               ## EXAMPLES:
-              - "12345" - Static folder internal ID (the dominant production form)
+              - "12345" - Static folder internal ID (the usual form)
               - "67890" - Another valid folder internal ID
               - "{{record.folderId}}" - Dynamic folder ID from integration data (double braces)
             - |-

@@ -60,7 +60,12 @@ Http:
           - The connection is a cloud file provider used in FOLDER mode (Google Drive, Box, Dropbox,
             Azure Blob Storage, Google Cloud Storage, Celigo Storage): the export reads the files
             in a folder and the 'file' object's `type` (csv, json, xml, xlsx, filedefinition)
-            parses each one into records — the same file layer as an FTP or S3 export
+            parses each one into records — the same file layer as an FTP or S3 export. In folder
+            mode `relativeURI` is a folder path: an API endpoint path there fails the run with
+            "Directory is not found. Please create one and provide the path." To download one
+            file per record through the provider's API instead, leave `http.type` unset, set the
+            export's top-level `type` to `blob` (typically on a lookup) and point `relativeURI`
+            at the file-download endpoint
 
           Examples of when to set type: "file":
           - "Download PDF invoices from the API" → type: "file"
@@ -132,7 +137,7 @@ Http:
           (`http.paging.body` likewise from its paging fields). A body that is not parseable JSON at
           rest — Handlebars block helpers outside a string value — renders every field EMPTY in that
           form, so keep templated variables inside a JSON string value:
-          `"variables": "{\"after\": {{#if export.http.paging.token}}\"{{export.http.paging.token}}\"{{else}}null{{/if}}}"`.
+          `"variables": "{\"after\": {{#if export.http.paging.token}}\"{{export.http.paging.token}}\"{{else}}null{{/if}} }"`.
         - |-
           The GraphQL form has no relative URI field: the connection `baseURI` is expected to be the
           GraphQL endpoint (a saved `relativeURI` still applies but is not shown). Create GraphQL
@@ -195,6 +200,8 @@ Http:
       x-celigo-handlebars-context: pre-mapped
       description: |-
         Resource path appended to the connection's `baseURI` to form the complete request URL. Path segments, query parameters, or the entire value can be built with handlebars expressions for endpoints determined at runtime. For lookup exports (`isLookup: true`) with mappings configured, handlebars always render against the original pre-mapped input record, so fields removed or renamed by mappings remain available for URI construction. On `NetSuiteHTTPExport` the base URL is derived from the NetSuite connection and `nsDomainType`, so the path starts at `/services/rest/...` or `/app/site/hosting/restlet.nl`.
+
+        Leave it empty to call the connection's `baseURI` exactly; `/` appends a trailing slash, which is a different URL. An export saved with an empty relative URI and no `http.body` comes back from reads without its `http` block, so a PUT built from such a read loses the stored settings: send the complete `http` block with every PUT.
       x-celigo-ai-guidance:
         - The resource path portion of the API endpoint used for this export.
         - |-
@@ -910,15 +917,6 @@ Http:
           type: string
           description: |-
             Where the export looks for the pagination token referenced by `path`. Required for `method: token`; not used by other pagination methods.
-          x-celigo-canon:
-            decision: stricter-than-server
-            reason: >-
-              The server defaults an omitted pathLocation to body, and most stored
-              token-paging exports omit it — but new configs must declare where the
-              token is read from; a header-delivered token fails silently under the
-              implicit body default. Stored-document carriage is not grounds to relax.
-            method: full-population
-            verified: '2026-07-04'
           x-celigo-ai-guidance:
             - |-
               ## FIELD BEHAVIOR
@@ -1546,13 +1544,6 @@ Http:
       properties:
         resourcePath:
           type: string
-          x-celigo-canon:
-            decision: no-enum
-            reason: >-
-              Freeform user-defined JSON path into each API's own response envelope — low
-              observed cardinality is an artifact of common envelope names, not a vocabulary.
-            method: full-population
-            verified: '2026-07-03'
           description: |-
             Dot-separated path to the array of records inside the response body (e.g. `data.customers` for `{"data": {"customers": [...]}}`); without it, a wrapped response is treated as a single record. Values starting with `$` are evaluated as JSONPath instead of dot notation — including unions (`$['orders','invoices'][*]`) and filter expressions (`$.items[?(@.qty>3)]`); all other values keep the existing dot-notation behavior unchanged. Leave undefined when the API returns a bare JSON array. This extracts records from the API response — not to be confused with `oneToMany`/`pathToMany`, which unwrap arrays from input records, or `paging.resourcePath`, which applies only to subsequent page responses.
           x-celigo-ai-guidance:

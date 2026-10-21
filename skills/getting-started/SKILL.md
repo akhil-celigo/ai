@@ -57,20 +57,24 @@ For APIs and tools, the same principle applies: build the connections, exports, 
 
 ### 0. Pick your surface: CLI or MCP
 
-Skills in this pack show `celigo ...` CLI commands, but there are two equivalent ways to execute most operations:
+There are two ways to run the operations these skills describe:
 
-- **The Celigo CLI** -- what the command blocks in these skills show.
-- **The Celigo Platform MCP server** -- if your agent is connected to it, the same operations are MCP tools. Translate CLI blocks directly: `list_<type>` / `upsert_<type>` replace `celigo <type> list|get|create|update`, `delete_resource` replaces `celigo <type> delete`, and `run_flow`, `cancel_job`, `list_jobs`, `list_flow_errors`, `list_execution_logs`, `deploy_template`, and `get_schema` cover running, monitoring, deploying, and schema lookups. The MCP server also has tools with no CLI equivalent, such as `search_knowledge_base` and `triage_flow_errors`.
+- **The Celigo CLI** (`celigo ...`).
+- **The Celigo Platform MCP server** -- if your agent is connected to it, the operations are MCP tools: `list_<type>` lists a resource family or, with an `_id`, reads one document; `upsert_<type>` creates (no `_id`) or replaces a whole document (with `_id`); `patch_flow` changes whitelisted flow fields in place; and `delete_resource` deletes. `run_flow`, `cancel_flow_run`, `list_flow_runs`, `list_current_jobs`, `list_flow_errors`, `triage_flow_errors`, `list_execution_logs`, `install_template`, and `get_schema` cover running, monitoring, error handling, deploying, and schema lookups; `list_users` / `manage_user` cover users, and `search_docs` covers `celigo docs search`.
 
-A few operations are CLI-only (no MCP tool): the local account index (`celigo account snapshot|search|dependencies|lint`), stacks, on-premise agents, and user management. For those, use the CLI, the integrator.io REST API, or the UI. API tokens are managed only in the UI -- there is no CLI command or MCP tool, and the REST endpoints refuse bearer-token callers (see [managing-api-tokens](../managing-api-tokens/SKILL.md#where-tokens-are-managed)).
+A skill with a `references/mcp.md` and `references/cli.md` describes each step by what it reads or changes and keeps the exact calls in those two files -- read the one that matches your tools. Skills without them still show `celigo` commands; on MCP, map each command onto the tools above: `list_<type>` / `upsert_<type>` replace `celigo <type> list|get|create|update`, `delete_resource` replaces `celigo <type> delete`, and `triage_flow_errors` covers `celigo flows retry-errors|resolve-errors|assign-errors|tag-errors`. Change a single flow field with `patch_flow` rather than a read and a full `upsert_flow`; no other resource has a patch tool.
+
+A few operations are CLI-only (no MCP tool): the local account index (`celigo account snapshot|search|dependencies|lint`), stacks, on-premise agents, and the recycle bin (`celigo recycle-bin restore|purge`; the MCP server restores only Celigo Storage files and folders). For those, use the CLI, the integrator.io REST API, or the UI. API tokens are managed only in the UI -- there is no CLI command or MCP tool, and the REST endpoints refuse bearer-token callers (see [managing-api-tokens](../managing-api-tokens/SKILL.md#where-tokens-are-managed)).
 
 ### 1. Configure the CLI
 
 ```bash
 celigo config set api_token <your-token>       # Set your API bearer token
-celigo config set base_url <url>               # Optional: override base URL for sandbox/EU
+celigo config set base_url <url>               # Optional: your region's API host (EU, AU, CA)
 celigo config show                             # Verify configuration
 ```
+
+`base_url` selects only the region: `https://api.integrator.io` by default, or `https://api.eu.integrator.io`, `https://api.au.integrator.io`, or `https://api.ca.integrator.io`. The token selects the account and environment -- a sandbox has its own token at the same host -- and `celigo profile whoami` names the account and environment a profile reaches.
 
 The CLI accepts either token kind from **Resources > API tokens** as its bearer token: a **personal access token** (administrators, manage, and monitor users each generate their own -- the account owner can't; inherits your own permissions; expires after 90 days by default) or an **account API token** (owner/admin-created, scopeable, long-lived -- prefer it for CI, and the owner's only option). See [managing-api-tokens](../managing-api-tokens/SKILL.md).
 
@@ -124,7 +128,7 @@ Whichever it is, on a live account follow [Working on a Live Account](#working-o
 - What happens when a step fails? (`proceedOnFailure`, error notifications)
 - Do downstream steps need data from upstream responses? (response mapping)
 - Is this a one-off or a reusable template? (abstract/instance flow)
-- Sandbox or production? (never mix -- `sandbox: true` flows only use `sandbox: true` connections)
+- Production or a sandbox? Each environment is reached with its own token or profile; the `sandbox` field doesn't choose it (see [Sandbox vs Production](#sandbox-vs-production))
 - Can the same record arrive twice -- webhook retries, re-runs, overlapping flows? Then the write must be idempotent ([configuring-imports > Writing Exactly Once](../configuring-imports/SKILL.md#writing-exactly-once))
 
 ## Working on a Live Account
@@ -142,18 +146,16 @@ Every account you reach through the CLI or the API is a real one -- production f
    Reads need no confirmation. When the CLI asks to confirm and there's no terminal, it refuses rather than guessing: put the question to the user, and add `-y` only once they've approved that exact command. Never change the CLI's mode (`celigo config set mode`, or `CELIGO_MODE`) to get past a read-mode refusal -- tell the user what it blocked.
 2. **Change the live document; never rebuild it.** Start from a fresh GET, change only the fields the task needs, and write that back -- `celigo <type> set` for a few fields, or GET, edit, and `celigo <type> update` for more. Never PUT a body rebuilt from memory, a template, or an older copy: PUT replaces the whole document and drops whatever you didn't carry -- mappings, hooks, settings someone else added since.
 3. **Read back after every save.** A 200 doesn't prove the change landed as meant: some fields are ignored silently on some routes (a flow's `logging` is ignored in POST and PUT bodies; only PATCH sets it). GET the resource and check the fields you changed, and that nothing else moved.
-4. **Fix in place; never delete and recreate.** A recreated resource gets a new `_id`, and what pointed at the old one doesn't follow: flow steps, `_connectionId` / `_exportId` / `_importId` references, `_runNextFlowIds`, delta checkpoints, open errors and their retry data. If something was deleted by mistake, `celigo recycle-bin restore <id>` brings it back with the same `_id`.
+4. **Fix in place; never delete and recreate.** A recreated resource gets a new `_id`, and what pointed at the old one doesn't follow: flow steps, `_connectionId` / `_exportId` / `_importId` references, `_runNextFlowIds`, delta checkpoints, open errors and their retry data. Some deletes can't be undone: an iClient or a user is deleted for good, a sync never enters the recycle bin, and the bin doesn't serve access tokens or HTTP connectors. Most other resources stay restorable for 30 days: if one was deleted by mistake, `celigo recycle-bin restore <id> --cascade` brings it back with the same `_id`, together with what was deleted with it -- a plain restore fails with `descendants_not_restored` while any of those is still in the bin.
 5. **Pick connections by connector identity, not by name.** A connection's name is free text; its connector (`http._httpConnectorId`, plus `http._httpConnectorApiId` for multi-API connectors) or its type and target says what it actually reaches. See [configuring-connections > Check for existing connections](../configuring-connections/SKILL.md#3-check-for-existing-connections).
 
 <!-- TIER:3 -->
 
 ## Sandbox vs Production
 
-Celigo enforces strict separation:
+Each environment (Production, a sandbox, Development, ...) is an isolated partition of the account with its own connections, flows, and users, reached with its own token or profile. Nothing crosses environments, so an id from another environment isn't found here -- that's scoping, not absence.
 
-- A `sandbox: true` connection can only be used by `sandbox: true` flows
-- A production (non-sandbox) connection can only be used by production flows
-- Mixing sandbox and production resources will cause runtime errors
+The `sandbox` field is a deprecated legacy marker: honored only when a flow is created (and refused without a sandbox subscription), ignored on update, and read-only on connections. Never set it to move a resource or to mark which environment it belongs to; `celigo profile whoami` names the environment a profile reaches.
 
 When testing, always create flows with `disabled: true` and verify before enabling.
 

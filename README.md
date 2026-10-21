@@ -30,7 +30,7 @@ npx skills add celigo/ai --skill configuring-exports -a claude-code
 
 ## Install as a Plugin
 
-This repo is also a native plugin marketplace for Claude Code and Cursor, bundling all of the skills below plus the Celigo Platform MCP server.
+This repo is also a native plugin for Claude Code, Cursor, Codex, and Grok Build, bundling all of the skills below plus the Celigo Platform MCP server.
 
 **[Claude Code](https://code.claude.com)** -- in the app, or with the `claude` CLI:
 
@@ -39,17 +39,32 @@ This repo is also a native plugin marketplace for Claude Code and Cursor, bundli
 /plugin install celigo@celigo
 ```
 
-**[Cursor](https://cursor.com)** -- install **Celigo** from the Cursor plugin marketplace (Settings -> Plugins). Team admins can add this repo directly under Team Marketplaces.
+**[Cursor](https://cursor.com)** -- team admins can add this repo directly under Team Marketplaces. To add only the MCP server, use the one-click **Add to Cursor** link in [Connect the Celigo MCP server](docs/connect-mcp.md#one-click-setup).
 
 **[Codex](https://developers.openai.com/codex)** -- run `codex plugin marketplace add celigo/ai`, then install **celigo** from the Plugins Directory in the ChatGPT desktop app.
 
+**[Grok Build](https://x.ai/cli)** -- install it straight from this repo. `--trust` lets the plugin's MCP server run:
+
+```
+grok plugin install celigo/ai --trust
+```
+
 For [50+ other agents](https://github.com/vercel-labs/skills#compatibility), use the [skills install](#install-skills) above.
 
-Installing the plugin also configures the **Celigo Platform MCP server** (`https://api.integrator.io/celigo-mcp`). It authenticates via OAuth -- the first time an agent uses it, you'll be prompted to sign in to Celigo, so no API token is required.
+Installing the plugin also configures the **Celigo Platform MCP server**. It authenticates via OAuth -- the first time an agent uses it, you'll be prompted to sign in to Celigo, so no API token is required.
 
-The plugin ships the **US** endpoint. Each region runs its own identity provider, so if your account lives in the **EU**, **AU**, or **CA**, the sign-in won't complete against it -- configure your region's endpoint by hand instead (`https://api.eu.integrator.io/celigo-mcp`, `https://api.au.integrator.io/celigo-mcp`, or `https://api.ca.integrator.io/celigo-mcp`). See [Regions](docs/connect-mcp.md#regions).
+Each region runs its own identity provider, so the sign-in only completes against the region that hosts your account. The plugin connects to the **US** endpoint (`https://api.integrator.io/celigo-mcp`) unless you pick another region:
 
-Using a different client -- VS Code, Windsurf, Gemini CLI, Codex CLI, or Claude Desktop? See **[Connect the Celigo MCP server](docs/connect-mcp.md)** for copy-paste config and a one-click *Add to Cursor* button.
+- **Claude Code:** choose **Celigo region** when the plugin asks, or change it later with `/plugin configure celigo@celigo`. From the CLI, pass it at install: `claude plugin install celigo@celigo --config api_host=api.eu.integrator.io`. The region picker needs Claude Code 2.1.271 or later.
+- **Cursor:** set the plugin's **Celigo region** (`CELIGO_API_HOST`) under Plugins -> Configure in the Cursor dashboard, or set a `CELIGO_API_HOST` environment variable (for example `api.eu.integrator.io`), which takes precedence.
+- **Grok Build:** open `/mcps`, select **Celigo** (it shows *setup required*), and pick your region. The server doesn't start until you do, even for US. To switch regions later, set a `CELIGO_API_HOST` environment variable (for example `api.eu.integrator.io`), which takes precedence.
+- **Codex:** the plugin always uses the US endpoint. For the **EU**, **AU**, or **CA**, add your region's server by hand -- see [Codex CLI](docs/connect-mcp.md#codex-cli).
+
+The plugin connects to one region at a time. To work in accounts in more than one region, add each extra region as its own server under a different name, such as `Celigo-EU`. See [Regions](docs/connect-mcp.md#regions) for every region's endpoint.
+
+Using Claude (claude.ai, Desktop, or mobile)? Celigo is in Claude's connectors directory for every region: **[Add to Claude](https://claude.ai/directory/connectors/celigo)**, then select **Connect** and pick your region's URL.
+
+Using a different client -- VS Code, Windsurf, Gemini CLI, Codex CLI, or Claude Desktop's config file? See **[Connect the Celigo MCP server](docs/connect-mcp.md)** for one-click *Add to Claude*, *Add to Cursor*, and *Install in VS Code* links and copy-paste config.
 
 ## Skills
 
