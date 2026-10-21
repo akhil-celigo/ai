@@ -19,7 +19,7 @@ Beyond fetching data, exports also handle post-retrieval processing before recor
 - **Output filter** -- expression-based filtering to skip records that don't match criteria
 - **Transform** -- Transformation 2.0 expression rules to reshape/flatten response data before mapping
 - **preSavePage hook** -- JavaScript processing on the full page of records before they enter the pipeline
-- **One-to-many** -- when used as a lookup, fan out a child array already on the input record. Set `oneToMany: true` and `pathToMany` to that array path so each child triggers a separate lookup. Once fanned out, the array element itself is the record and the original parent is `record._PARENT`. This is not `resourcePath`, which extracts records from an API response -- see [One-to-many fan-out](#one-to-many-fan-out----the-array-element-is-the-record)
+- **One-to-many** -- when used as a lookup, fan out a child array already on the input record. Set `oneToMany: true` and `pathToMany` to that array path so each child triggers a separate lookup. Once fanned out, the array element itself is the record, and the parent (without the array) is `record._PARENT`. This is not `resourcePath`, which locates records in an API response -- see [One-to-many fan-out](#one-to-many-fan-out----the-array-element-is-the-record)
 - **Response mapping** -- when used as a lookup, extract fields from the lookup response back into the record. Configured on the flow's `pageProcessors[]` entry, but planned when building the lookup export. The response contains a `data` array and an `errors` array. Use `data[0].fieldName` when you expect a single result (e.g., fetching one order by ID). When multiple results are expected, map the whole array with `extract: "data"` (downstream steps then read it as a normal JSON array, or fan out over it with one-to-many), or use a `lists` entry with `data[*].fieldName` extracts to build a reshaped array. Do not put `data[*].fieldName` in a top-level `fields[].extract` -- the wildcard is silently ignored there and nothing is merged. See [writing-mappings > Response Mapping Reference](../writing-mappings/SKILL.md#response-mapping-reference-transformation-10). Response mapping uses Transformation 1.0 syntax (extract/generate pairs), not the newer expression-based transforms
 - **postResponseMap hook** -- JavaScript processing after response mapping merges the lookup response back into the record. Configured on the flow's `pageProcessors[]` entry, but planned when building the lookup export
 
@@ -293,16 +293,16 @@ Three lookup behaviors to plan for before the first test:
 
 ### One-to-many fan-out -- the array element IS the record
 
-`oneToMany` plus `pathToMany` unwraps a child array that is already on the input record. It does not extract rows from an API response (`resourcePath` does that) and it does not turn a multi-row lookup response into separate records (response mapping `extract: "data"` does that).
+`oneToMany` plus `pathToMany` unwraps a child array that is already on the input record. It does not locate records in an API response (`resourcePath` does that), and it does not split a lookup's multi-row response (map that onto the record with response mapping `extract: "data"`, then fan out over the mapped array in a later step).
 
 With `oneToMany: true` and `pathToMany` set to a child array path, each element of that array triggers its own lookup. Once fanned out, **the element becomes the record**:
 
 - Child fields are `{{record.variantId}}` -- not `{{variantId}}`, and not `{{record.lineItems.variantId}}`.
-- The original parent is still on the record as `record._PARENT`. Parent fields are `{{record._PARENT.id}}`, not fields of the child.
+- The parent's other fields stay on the child as `record._PARENT` (the parent without the array): `{{record._PARENT.id}}`.
 
-Fan-out does not change the request root to `batch_of_records`. `batchSize` still decides that: with the default `batchSize` of 1 the fanned-out child is `record`; `batch_of_records` appears only when `batchSize` is greater than 1.
+Fan-out does not change the request root to `batch_of_records`. A lookup has no request batch size: it runs once per fanned-out child, and its request always renders against `record`.
 
-When the arriving record is itself an array -- grouped rows from a `groupByFields` export or a file group -- leave `pathToMany` blank: each element becomes the record. A path on an array record fans out zero children and still reports success; a blank path on an object record fails with `oneToMany_error`.
+When the arriving record is itself an array -- grouped rows from a `groupByFields` export or a file group -- leave `pathToMany` blank: each element becomes the record, with no `_PARENT`. A path on an array record fans out zero children and still reports success; a blank path on an object record fails with `oneToMany_error`.
 
 Three consequences worth knowing before you debug the wrong thing:
 
